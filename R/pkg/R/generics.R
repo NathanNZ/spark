@@ -1608,7 +1608,15 @@ setGeneric("window", function(x, ...) { standardGeneric("window") })
 
 #' @rdname column_misc_functions
 #' @name NULL
+setGeneric("xxhash3", function(x, ...) { standardGeneric("xxhash3") })
+
+#' @rdname column_misc_functions
+#' @name NULL
 setGeneric("xxhash64", function(x, ...) { standardGeneric("xxhash64") })
+
+#' @rdname column_misc_functions
+#' @name NULL
+setGeneric("xxhash128", function(x, ...) { standardGeneric("xxhash128") })
 
 #' @rdname column_datetime_functions
 #' @name NULL

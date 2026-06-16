@@ -476,6 +476,8 @@ exportMethods("%<=>%",
               "width_bucket",
               "window",
               "withField",
+              "xxhash128",
+              "xxhash3",
               "xxhash64",
               "year")
 
