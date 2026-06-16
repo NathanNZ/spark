@@ -18,6 +18,8 @@
 package org.apache.spark.sql.catalyst.expressions
 
 import java.nio.charset.StandardCharsets
+import java.nio.ByteBuffer
+import java.nio.ByteOrder
 import java.time.{Duration, LocalTime, Period, ZoneId, ZoneOffset}
 
 import scala.collection.mutable.ArrayBuffer
@@ -30,11 +32,12 @@ import org.apache.spark.sql.{RandomDataGenerator, Row}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.encoders.{ExamplePointUDT, ExpressionEncoder}
 import org.apache.spark.sql.catalyst.expressions.codegen.GenerateMutableProjection
+import org.apache.spark.sql.catalyst.expressions.variant.VariantExpressionEvalUtils
 import org.apache.spark.sql.catalyst.util.{ArrayBasedMapData, CollationFactory, DateTimeUtils, GenericArrayData, IntervalUtils}
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{ArrayType, StructType, _}
 import org.apache.spark.unsafe.hash.Murmur3_x86_32
-import org.apache.spark.unsafe.types.{TimestampNanosVal, UTF8String}
+import org.apache.spark.unsafe.types.{TimestampNanosVal, UTF8String, VariantVal}
 import org.apache.spark.util.ArrayImplicits._
 
 class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
@@ -90,6 +93,340 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
       2180413220L)
     checkEvaluation(Crc32(Literal.create(null, BinaryType)), null)
     checkConsistencyBetweenInterpretedAndCodegen(Crc32, BinaryType)
+  }
+
+  test("xxhash128 codegen parity for multi-child chains") {
+    // Pairs of literals: each chain is 2-child to test that the seed correctly
+    // threads from child N's fold into child N+1.
+    def check(label: String, children: Seq[Literal]): Unit = {
+      val expr = new XxHash128(children)
+      val expected = expr.eval(null).asInstanceOf[Array[Byte]]
+      try checkEvaluation(expr, expected) catch {
+        case t: Throwable =>
+          fail(s"multi-child chain '$label' failed: ${t.getMessage}")
+      }
+    }
+    val udt = new ExamplePointUDT
+    val point = udt.serialize(
+      new org.apache.spark.sql.catalyst.encoders.ExamplePoint(1.5, 2.5))
+    check("null+int", Seq(Literal.create(null, NullType), Literal.create(7, IntegerType)))
+    check("int+null", Seq(Literal.create(7, IntegerType), Literal.create(null, NullType)))
+    check("int+udt", Seq(Literal.create(7, IntegerType), Literal.create(point, udt)))
+    check("udt+int", Seq(Literal.create(point, udt), Literal.create(7, IntegerType)))
+    check("string+udt", Seq(
+      Literal.create(UTF8String.fromString("hi"), StringType),
+      Literal.create(point, udt)))
+    check("null+null", Seq(Literal.create(null, NullType), Literal.create(null, NullType)))
+  }
+
+  test("xxhash128 codegen parity for UDT") {
+    val udt = new ExamplePointUDT
+    val point = udt.serialize(
+      new org.apache.spark.sql.catalyst.encoders.ExamplePoint(1.5, 2.5))
+    val expr = new XxHash128(Seq(Literal.create(point, udt)))
+    val expected = expr.eval(null).asInstanceOf[Array[Byte]]
+    checkEvaluation(expr, expected)
+  }
+
+  test("xxhash128 codegen parity per primitive type") {
+    // Drive each primitive type independently so a mismatch fingerprints to one type.
+    val cases: Seq[(String, Any, DataType)] = Seq(
+      ("null", null, NullType),
+      ("boolean", true, BooleanType),
+      ("byte", (-12).toByte, ByteType),
+      ("short", 32767.toShort, ShortType),
+      ("int", 1390689586, IntegerType),
+      ("long", 8663709074L, LongType),
+      ("float", 1.5f, FloatType),
+      ("float -0", -0.0f, FloatType),
+      ("double", 6.0967941679987284, DoubleType),
+      ("double -0", -0.0d, DoubleType),
+      ("smallDec", Decimal(123456789L, 10, 0), DecimalType(10, 0)),
+      ("bigDec", Decimal(BigDecimal("123456789.123456789"), 38, 18), DecimalType(38, 18)),
+      ("string", UTF8String.fromString("hello"), StringType),
+      ("binary", Array[Byte](1, 2, 3, 4, 5), BinaryType),
+      ("date", 19000, DateType),
+      ("timestamp", 1700000000000000L, TimestampType))
+    for ((name, value, dt) <- cases) {
+      val expr = new XxHash128(Seq(Literal.create(value, dt)))
+      val expected = expr.eval(null).asInstanceOf[Array[Byte]]
+      try checkEvaluation(expr, expected) catch {
+        case t: Throwable =>
+          fail(s"xxhash128 parity failed for case '$name' (dt=$dt, value=$value): ${t.getMessage}")
+      }
+    }
+  }
+
+  test("xxhash128") {
+    def expectedBytes(high64: Long, low64: Long): Array[Byte] = {
+      ByteBuffer.allocate(16).order(ByteOrder.BIG_ENDIAN).putLong(high64).putLong(low64).array()
+    }
+
+    checkEvaluation(
+      new XxHash128(Seq(Literal.create(Array.empty[Byte], BinaryType))),
+      expectedBytes(-7374073936536430376L, 6918025063187695999L))
+    checkEvaluation(
+      new XxHash128(Seq(Literal.create(Array[Byte](0), BinaryType))),
+      expectedBytes(-6427377105285148822L, -4302098779834749733L))
+  }
+
+  test("xxhash3") {
+    checkEvaluation(new XxHash3(Seq(Literal.create(Array.empty[Byte], BinaryType))),
+      3244421341483603138L)
+    checkEvaluation(new XxHash3(Seq(Literal.create(Array[Byte](0), BinaryType))),
+      -4302098779834749733L)
+  }
+
+  // ---------------------------------------------------------------------------
+  // XXH3-family contract: position-aware nulls, single-value interop, tombstone,
+  // Map insertion-order independence, Variant field-order independence.
+  // ---------------------------------------------------------------------------
+
+  private def xxh3Eval(children: Seq[Expression]): Long =
+    new XxHash3(children).eval(InternalRow.empty).asInstanceOf[Long]
+
+  private def xxh128Eval(children: Seq[Expression]): Array[Byte] =
+    new XxHash128(children).eval(InternalRow.empty).asInstanceOf[Array[Byte]]
+
+  test("xxhash3 single-value interop with the C reference") {
+    // hash(x) at top-level position 1 has no position-mix and must match the bare XXH3 call.
+    val intLit = Literal.create(1234, IntegerType)
+    assert(xxh3Eval(Seq(intLit)) == XXH3.hashInt64(1234, 0L))
+  }
+
+  test("xxhash128 single-value interop with the C reference") {
+    val byteArr = Literal.create(Array[Byte](1, 2, 3, 4, 5), BinaryType)
+    assert(java.util.Arrays.equals(
+      xxh128Eval(Seq(byteArr)),
+      XXH3.hashUnsafeBytes128(Array[Byte](1, 2, 3, 4, 5), 16L, 5, 0L)))
+  }
+
+  test("xxhash3 interior null perturbs the result") {
+    val x = Literal.create(1, IntegerType)
+    val y = Literal.create(2, IntegerType)
+    val z = Literal.create(null, IntegerType)
+    assert(xxh3Eval(Seq(x, z, y)) != xxh3Eval(Seq(x, y)))
+    assert(xxh3Eval(Seq(z, x))    != xxh3Eval(Seq(x)))
+    assert(xxh3Eval(Seq(z, z, x)) != xxh3Eval(Seq(z, x)))
+  }
+
+  test("xxhash128 interior null perturbs the result") {
+    val x = Literal.create(1, IntegerType)
+    val y = Literal.create(2, IntegerType)
+    val z = Literal.create(null, IntegerType)
+    assert(!java.util.Arrays.equals(xxh128Eval(Seq(x, z, y)), xxh128Eval(Seq(x, y))))
+    assert(!java.util.Arrays.equals(xxh128Eval(Seq(z, x)),    xxh128Eval(Seq(x))))
+    assert(!java.util.Arrays.equals(xxh128Eval(Seq(z, z, x)), xxh128Eval(Seq(z, x))))
+  }
+
+  test("xxhash3 trailing nulls are invariant") {
+    val x = Literal.create(1, IntegerType)
+    val y = Literal.create(2, IntegerType)
+    val z = Literal.create(null, IntegerType)
+    assert(xxh3Eval(Seq(x, y)) == xxh3Eval(Seq(x, y, z)))
+    assert(xxh3Eval(Seq(x, y)) == xxh3Eval(Seq(x, y, z, z)))
+  }
+
+  test("xxhash128 trailing nulls are invariant") {
+    val x = Literal.create(1, IntegerType)
+    val y = Literal.create(2, IntegerType)
+    val z = Literal.create(null, IntegerType)
+    assert(java.util.Arrays.equals(xxh128Eval(Seq(x, y)), xxh128Eval(Seq(x, y, z))))
+    assert(java.util.Arrays.equals(xxh128Eval(Seq(x, y)), xxh128Eval(Seq(x, y, z, z))))
+  }
+
+  test("xxhash3 null is distinct from 0L / false / 0.0 / 0.0f") {
+    val z = Literal.create(null, LongType)
+    val zNullInt = Literal.create(null, IntegerType)
+    val l0 = Literal.create(0L, LongType)
+    val i0 = Literal.create(0, IntegerType)
+    val b0 = Literal.create(false, BooleanType)
+    val d0 = Literal.create(0.0d, DoubleType)
+    val f0 = Literal.create(0.0f, FloatType)
+    // (null) is the all-null tombstone (returns seed=0 for xxhash3, 16 zero bytes for xxhash128).
+    // Each non-null zero must hash to something non-zero (i.e. != tombstone).
+    assert(xxh3Eval(Seq(l0))        != 0L)
+    assert(xxh3Eval(Seq(i0))        != 0L)
+    assert(xxh3Eval(Seq(b0))        != 0L)
+    assert(xxh3Eval(Seq(d0))        != 0L)
+    assert(xxh3Eval(Seq(f0))        != 0L)
+    // Both null types (Long-null and Int-null) collapse to tombstone identically.
+    assert(xxh3Eval(Seq(z))         == 0L)
+    assert(xxh3Eval(Seq(zNullInt))  == 0L)
+    // Mixed: (null, x) differs from (0L, x) -- null contributes no primitive call but advances pos.
+    val x = Literal.create(7L, LongType)
+    assert(xxh3Eval(Seq(z, x)) != xxh3Eval(Seq(l0, x)))
+  }
+
+  test("xxhash128 null is distinct from 0L") {
+    val z  = Literal.create(null, LongType)
+    val l0 = Literal.create(0L, LongType)
+    val x  = Literal.create(7L, LongType)
+    assert(!java.util.Arrays.equals(xxh128Eval(Seq(z, x)), xxh128Eval(Seq(l0, x))))
+  }
+
+  test("xxhash3 all-null inputs return the tombstone") {
+    val z = Literal.create(null, IntegerType)
+    assert(xxh3Eval(Seq(z))       == 0L)
+    assert(xxh3Eval(Seq(z, z, z)) == 0L)
+  }
+
+  test("xxhash128 all-null inputs return the tombstone") {
+    val z = Literal.create(null, IntegerType)
+    assert(java.util.Arrays.equals(xxh128Eval(Seq(z)),       new Array[Byte](16)))
+    assert(java.util.Arrays.equals(xxh128Eval(Seq(z, z, z)), new Array[Byte](16)))
+  }
+
+  test("xxhash3 seed parity: explicit seed vs default seed") {
+    val x = Literal.create(42L, LongType)
+    assert(xxh3Eval(Seq(x)) == XxHash3(Seq(x), 0L).eval(InternalRow.empty))
+    val seeded = XxHash3(Seq(x), 7L).eval(InternalRow.empty).asInstanceOf[Long]
+    assert(seeded != xxh3Eval(Seq(x)))
+  }
+
+  test("xxhash128 seed parity: explicit seed vs default seed") {
+    val x = Literal.create(42L, LongType)
+    val seeded128 = XxHash128(Seq(x), 7L).eval(InternalRow.empty).asInstanceOf[Array[Byte]]
+    assert(!java.util.Arrays.equals(seeded128, xxh128Eval(Seq(x))))
+  }
+
+  test("xxhash3 MapType: entries are insertion-order independent") {
+    val k1 = UTF8String.fromString("alpha")
+    val k2 = UTF8String.fromString("bravo")
+    val k3 = UTF8String.fromString("charlie")
+    val keysAsc  = new GenericArrayData(Array[Any](k1, k2, k3))
+    val keysDesc = new GenericArrayData(Array[Any](k3, k2, k1))
+    val valsAsc  = new GenericArrayData(Array[Any](1L, 2L, 3L))
+    val valsDesc = new GenericArrayData(Array[Any](3L, 2L, 1L))
+    val mt = MapType(StringType, LongType, valueContainsNull = false)
+    val mapAsc  = Literal.create(new ArrayBasedMapData(keysAsc, valsAsc), mt)
+    val mapDesc = Literal.create(new ArrayBasedMapData(keysDesc, valsDesc), mt)
+    assert(xxh3Eval(Seq(mapAsc)) == xxh3Eval(Seq(mapDesc)))
+    val valsAltered = new GenericArrayData(Array[Any](1L, 2L, 99L))
+    val mapAltered = Literal.create(new ArrayBasedMapData(keysAsc, valsAltered), mt)
+    assert(xxh3Eval(Seq(mapAsc)) != xxh3Eval(Seq(mapAltered)))
+  }
+
+  test("xxhash128 MapType: entries are insertion-order independent") {
+    val k1 = UTF8String.fromString("alpha")
+    val k2 = UTF8String.fromString("bravo")
+    val k3 = UTF8String.fromString("charlie")
+    val keysAsc  = new GenericArrayData(Array[Any](k1, k2, k3))
+    val keysDesc = new GenericArrayData(Array[Any](k3, k2, k1))
+    val valsAsc  = new GenericArrayData(Array[Any](1L, 2L, 3L))
+    val valsDesc = new GenericArrayData(Array[Any](3L, 2L, 1L))
+    val mt = MapType(StringType, LongType, valueContainsNull = false)
+    val mapAsc  = Literal.create(new ArrayBasedMapData(keysAsc, valsAsc), mt)
+    val mapDesc = Literal.create(new ArrayBasedMapData(keysDesc, valsDesc), mt)
+    assert(java.util.Arrays.equals(xxh128Eval(Seq(mapAsc)), xxh128Eval(Seq(mapDesc))))
+  }
+
+  test("xxhash3 MapType: duplicate-key entries hash distinctly (addition, not XOR)") {
+    // With XOR accumulation, entryHash(k,v) ^ entryHash(k,v) == 0 for any identical duplicate,
+    // so {a:1,a:1} and {b:2,b:2} would both collapse to accumulator=0 -> same hash.
+    // Addition does not have this flaw. This test guards against reverting to XOR.
+    val mt = MapType(StringType, LongType, valueContainsNull = false)
+    def dupMap(k: String, v: Long) = Literal.create(
+      new ArrayBasedMapData(
+        new GenericArrayData(Array[Any](UTF8String.fromString(k), UTF8String.fromString(k))),
+        new GenericArrayData(Array[Any](v, v))),
+      mt)
+    assert(xxh3Eval(Seq(dupMap("a", 1L))) != xxh3Eval(Seq(dupMap("b", 2L))),
+      "{a:1,a:1} and {b:2,b:2} must not collide - XOR would make both reduce to 0")
+    assert(xxh3Eval(Seq(dupMap("a", 1L))) != xxh3Eval(Seq(dupMap("a", 2L))),
+      "{a:1,a:1} and {a:2,a:2} must differ")
+  }
+
+  test("xxhash128 MapType: duplicate-key entries hash distinctly (addition, not XOR)") {
+    val mt = MapType(StringType, LongType, valueContainsNull = false)
+    def dupMap(k: String, v: Long) = Literal.create(
+      new ArrayBasedMapData(
+        new GenericArrayData(Array[Any](UTF8String.fromString(k), UTF8String.fromString(k))),
+        new GenericArrayData(Array[Any](v, v))),
+      mt)
+    assert(!java.util.Arrays.equals(xxh128Eval(Seq(dupMap("a", 1L))), xxh128Eval(Seq(dupMap("b", 2L)))),
+      "{a:1,a:1} and {b:2,b:2} must not collide - XOR would make both reduce to 0")
+  }
+
+  test("xxhash3 MapType: multi-entry duplicates do not cancel (addition vs XOR)") {
+    // XOR: each pair cancels, {a:1,b:2,a:1,b:2} reduces to 0 == {}.
+    // Addition: 2*h(a,1)+2*h(b,2) != 0, and != h({a:1,b:2}).
+    val mt = MapType(StringType, LongType, valueContainsNull = false)
+    val ka = UTF8String.fromString("a"); val kb = UTF8String.fromString("b")
+    val fullDupMap = Literal.create(
+      new ArrayBasedMapData(
+        new GenericArrayData(Array[Any](ka, kb, ka, kb)),
+        new GenericArrayData(Array[Any](1L, 2L, 1L, 2L))), mt)
+    val singleMap = Literal.create(
+      new ArrayBasedMapData(
+        new GenericArrayData(Array[Any](ka, kb)),
+        new GenericArrayData(Array[Any](1L, 2L))), mt)
+    val emptyMap = Literal.create(
+      new ArrayBasedMapData(
+        new GenericArrayData(Array[Any]()),
+        new GenericArrayData(Array[Any]())), mt)
+    assert(xxh3Eval(Seq(fullDupMap)) != xxh3Eval(Seq(emptyMap)))
+    assert(xxh3Eval(Seq(fullDupMap)) != xxh3Eval(Seq(singleMap)))
+  }
+
+  test("xxhash128 MapType: multi-entry duplicates do not cancel (addition vs XOR)") {
+    val mt = MapType(StringType, LongType, valueContainsNull = false)
+    val ka = UTF8String.fromString("a"); val kb = UTF8String.fromString("b")
+    val fullDupMap = Literal.create(
+      new ArrayBasedMapData(
+        new GenericArrayData(Array[Any](ka, kb, ka, kb)),
+        new GenericArrayData(Array[Any](1L, 2L, 1L, 2L))), mt)
+    val emptyMap = Literal.create(
+      new ArrayBasedMapData(
+        new GenericArrayData(Array[Any]()),
+        new GenericArrayData(Array[Any]())), mt)
+    assert(!java.util.Arrays.equals(xxh128Eval(Seq(fullDupMap)), xxh128Eval(Seq(emptyMap))))
+  }
+
+  test("xxhash3 VariantType: object fields are name-order independent") {
+    def parseVariant(json: String): VariantVal =
+      VariantExpressionEvalUtils.parseJson(UTF8String.fromString(json))
+    val abLit = Literal.create(parseVariant("""{"a":1,"b":2}"""), VariantType)
+    val baLit = Literal.create(parseVariant("""{"b":2,"a":1}"""), VariantType)
+    assert(xxh3Eval(Seq(abLit)) == xxh3Eval(Seq(baLit)))
+    val altLit = Literal.create(parseVariant("""{"a":1,"b":99}"""), VariantType)
+    assert(xxh3Eval(Seq(abLit)) != xxh3Eval(Seq(altLit)))
+    val nestedAB = Literal.create(parseVariant("""{"x":{"a":1,"b":2},"y":3}"""), VariantType)
+    val nestedBA = Literal.create(parseVariant("""{"y":3,"x":{"b":2,"a":1}}"""), VariantType)
+    assert(xxh3Eval(Seq(nestedAB)) == xxh3Eval(Seq(nestedBA)))
+  }
+
+  test("xxhash128 VariantType: object fields are name-order independent") {
+    def parseVariant(json: String): VariantVal =
+      VariantExpressionEvalUtils.parseJson(UTF8String.fromString(json))
+    val abLit = Literal.create(parseVariant("""{"a":1,"b":2}"""), VariantType)
+    val baLit = Literal.create(parseVariant("""{"b":2,"a":1}"""), VariantType)
+    assert(java.util.Arrays.equals(xxh128Eval(Seq(abLit)), xxh128Eval(Seq(baLit))))
+    val nestedAB = Literal.create(parseVariant("""{"x":{"a":1,"b":2},"y":3}"""), VariantType)
+    val nestedBA = Literal.create(parseVariant("""{"y":3,"x":{"b":2,"a":1}}"""), VariantType)
+    assert(java.util.Arrays.equals(xxh128Eval(Seq(nestedAB)), xxh128Eval(Seq(nestedBA))))
+  }
+
+  test("xxhash3 codegen path matches interpreted for null patterns") {
+    val x = Literal.create(7, IntegerType)
+    val y = Literal.create(42L, LongType)
+    val z = Literal.create(null, IntegerType)
+    Seq(Seq(z, x, y), Seq(x, z, y), Seq(x, y, z), Seq(z, z, x), Seq(z, z, z, x), Seq(x, z, z, y))
+      .foreach { children =>
+        val expr = new XxHash3(children)
+        checkEvaluation(expr, expr.eval(InternalRow.empty))
+      }
+  }
+
+  test("xxhash128 codegen path matches interpreted for null patterns") {
+    val x = Literal.create(7, IntegerType)
+    val y = Literal.create(42L, LongType)
+    val z = Literal.create(null, IntegerType)
+    Seq(Seq(z, x, y), Seq(x, z, y), Seq(x, y, z), Seq(z, z, x), Seq(z, z, z, x), Seq(x, z, z, y))
+      .foreach { children =>
+        val expr = new XxHash128(children)
+        checkEvaluation(expr, expr.eval(InternalRow.empty))
+      }
   }
 
   def checkHiveHash(input: Any, dataType: DataType, expected: Long): Unit = {
@@ -551,39 +888,44 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
   private val mapOfString = MapType(StringType, StringType)
   private val arrayOfUDT = ArrayType(new ExamplePointUDT, false)
 
-  testHash(
-    new StructType()
-      .add("null", NullType)
-      .add("boolean", BooleanType)
-      .add("byte", ByteType)
-      .add("short", ShortType)
-      .add("int", IntegerType)
-      .add("long", LongType)
-      .add("float", FloatType)
-      .add("double", DoubleType)
-      .add("bigDecimal", DecimalType.SYSTEM_DEFAULT)
-      .add("smallDecimal", DecimalType.USER_DEFAULT)
-      .add("string", StringType)
-      .add("binary", BinaryType)
-      .add("date", DateType)
-      .add("timestamp", TimestampType)
-      .add("udt", new ExamplePointUDT))
+  private val primitiveSchema = new StructType()
+    .add("null", NullType)
+    .add("boolean", BooleanType)
+    .add("byte", ByteType)
+    .add("short", ShortType)
+    .add("int", IntegerType)
+    .add("long", LongType)
+    .add("float", FloatType)
+    .add("double", DoubleType)
+    .add("bigDecimal", DecimalType.SYSTEM_DEFAULT)
+    .add("smallDecimal", DecimalType.USER_DEFAULT)
+    .add("string", StringType)
+    .add("binary", BinaryType)
+    .add("date", DateType)
+    .add("timestamp", TimestampType)
+    .add("udt", new ExamplePointUDT)
 
-  testHash(
-    new StructType()
-      .add("arrayOfNull", arrayOfNull)
-      .add("arrayOfString", arrayOfString)
-      .add("arrayOfArrayOfString", ArrayType(arrayOfString))
-      .add("arrayOfArrayOfInt", ArrayType(ArrayType(IntegerType)))
-      .add("arrayOfStruct", ArrayType(structOfString))
-      .add("arrayOfUDT", arrayOfUDT))
+  private val arraySchema = new StructType()
+    .add("arrayOfNull", arrayOfNull)
+    .add("arrayOfString", arrayOfString)
+    .add("arrayOfArrayOfString", ArrayType(arrayOfString))
+    .add("arrayOfArrayOfInt", ArrayType(ArrayType(IntegerType)))
+    .add("arrayOfStruct", ArrayType(structOfString))
+    .add("arrayOfUDT", arrayOfUDT)
 
-  testHash(
-    new StructType()
-      .add("structOfString", structOfString)
-      .add("structOfStructOfString", new StructType().add("struct", structOfString))
-      .add("structOfArray", new StructType().add("array", arrayOfString))
-      .add("structOfUDT", structOfUDT))
+  private val structSchema = new StructType()
+    .add("structOfString", structOfString)
+    .add("structOfStructOfString", new StructType().add("struct", structOfString))
+    .add("structOfArray", new StructType().add("array", arrayOfString))
+    .add("structOfUDT", structOfUDT)
+
+  testHash(primitiveSchema)
+  testHash(arraySchema)
+  testHash(structSchema)
+
+  testHash128(primitiveSchema)
+  testHash128(arraySchema)
+  testHash128(structSchema)
 
   test("hive-hash for decimal") {
     def checkHiveHashForDecimal(
@@ -784,6 +1126,11 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
       val xxHash64Eval = XxHash64(exprs, 42).eval(input)
       assert(xxHash64Plan(input).getLong(0) == xxHash64Eval)
 
+      val xxHash3Expr = XxHash3(exprs, 42L)
+      val xxHash3Plan = GenerateMutableProjection.generate(Seq(xxHash3Expr))
+      val xxHash3Eval = XxHash3(exprs, 42L).eval(input)
+      assert(xxHash3Plan(input).getLong(0) == xxHash3Eval)
+
       val hiveHashExpr = HiveHash(exprs)
       val hiveHashPlan = GenerateMutableProjection.generate(Seq(hiveHashExpr))
       val hiveHashEval = HiveHash(exprs).eval(input)
@@ -864,6 +1211,8 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     checkEvaluation(Murmur3Hash(Seq(yearMonth), 10), -686520021)
     checkEvaluation(XxHash64(Seq(dayTime), 10), 8228802290839366895L)
     checkEvaluation(XxHash64(Seq(yearMonth), 10), -1774215319882784110L)
+    checkEvaluation(XxHash3(Seq(dayTime), 10L), XxHash3(Seq(dayTime), 10L).eval())
+    checkEvaluation(XxHash3(Seq(yearMonth), 10L), XxHash3(Seq(yearMonth), 10L).eval())
     checkEvaluation(HiveHash(Seq(dayTime)), 743331816)
     checkEvaluation(HiveHash(Seq(yearMonth)), 1234)
   }
@@ -872,6 +1221,7 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     def checkResult(exprs1: Expression, exprs2: Expression): Unit = {
       checkEvaluation(Murmur3Hash(Seq(exprs1), 42), Murmur3Hash(Seq(exprs2), 42).eval())
       checkEvaluation(XxHash64(Seq(exprs1), 42), XxHash64(Seq(exprs2), 42).eval())
+      checkEvaluation(XxHash3(Seq(exprs1), 42L), XxHash3(Seq(exprs2), 42L).eval())
       checkEvaluation(HiveHash(Seq(exprs1)), HiveHash(Seq(exprs2)).eval())
     }
 
@@ -883,6 +1233,7 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     val time = Literal.create(LocalTime.of(23, 50, 59, 123456000), TimeType())
     checkEvaluation(Murmur3Hash(Seq(time), 10), 545499634)
     checkEvaluation(XxHash64(Seq(time), 10), -3550518982366774761L)
+    checkEvaluation(XxHash3(Seq(time), 10L), XxHash3(Seq(time), 10L).eval())
     checkEvaluation(HiveHash(Seq(time)), -1567775210)
   }
 
@@ -970,7 +1321,7 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
     val inputGenerator = RandomDataGenerator.forType(inputSchema, nullable = false).get
     val toRow = ExpressionEncoder(inputSchema).createSerializer()
     val seed = scala.util.Random.nextInt()
-    test(s"murmur3/xxHash64/hive hash: ${inputSchema.simpleString}") {
+    test(s"murmur3/xxHash64/xxHash3/hive hash: ${inputSchema.simpleString}") {
       for (_ <- 1 to 10) {
         val input = toRow(inputGenerator.apply().asInstanceOf[Row]).asInstanceOf[UnsafeRow]
         val literals = input.toSeq(inputSchema).zip(inputSchema.map(_.dataType)).map {
@@ -979,6 +1330,7 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
         // Only test the interpreted version has same result with codegen version.
         checkEvaluation(Murmur3Hash(literals, seed), Murmur3Hash(literals, seed).eval())
         checkEvaluation(XxHash64(literals, seed), XxHash64(literals, seed).eval())
+        checkEvaluation(XxHash3(literals, seed.toLong), XxHash3(literals, seed.toLong).eval())
         checkEvaluation(HiveHash(literals), HiveHash(literals).eval())
       }
     }
@@ -992,6 +1344,22 @@ class HashExpressionsSuite extends SparkFunSuite with ExpressionEvalHelper {
         }
         // Only test the interpreted version has same result with codegen version.
         checkEvaluation(XxHash64(literals, longSeed), XxHash64(literals, longSeed).eval())
+        checkEvaluation(XxHash3(literals, longSeed), XxHash3(literals, longSeed).eval())
+      }
+    }
+  }
+
+  private def testHash128(inputSchema: StructType): Unit = {
+    val inputGenerator = RandomDataGenerator.forType(inputSchema, nullable = false).get
+    val toRow = ExpressionEncoder(inputSchema).createSerializer()
+    test(s"xxHash128: ${inputSchema.simpleString}") {
+      for (_ <- 1 to 10) {
+        val input = toRow(inputGenerator.apply().asInstanceOf[Row]).asInstanceOf[UnsafeRow]
+        val literals = input.toSeq(inputSchema).zip(inputSchema.map(_.dataType)).map {
+          case (value, dt) => Literal.create(value, dt)
+        }
+        // Interpreted and codegen paths must agree.
+        checkEvaluation(new XxHash128(literals), new XxHash128(literals).eval())
       }
     }
   }

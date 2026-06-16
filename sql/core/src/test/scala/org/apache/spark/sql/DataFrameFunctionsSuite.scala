@@ -5979,6 +5979,58 @@ class DataFrameFunctionsSuite extends SharedSparkSession {
 
     checkError(
       exception = intercept[AnalysisException] {
+        df.select(xxhash3())
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxhash3`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.selectExpr("xxhash3()")
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxhash3`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select(xxhash128())
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxhash128`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.selectExpr("xxhash128()")
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxhash128`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
         df.select(greatest())
       },
       condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",

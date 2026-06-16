@@ -4541,6 +4541,27 @@ object functions {
   def hash(cols: Column*): Column = Column.fn("hash", cols: _*)
 
   /**
+   * Calculates the hash code of given columns using the 64-bit variant of the xxHash3 algorithm,
+   * and returns the result as a long column. The hash computation uses the reference seed of 0.
+   *
+   * @group hash_funcs
+   * @since 4.3.0
+   */
+  @scala.annotation.varargs
+  def xxhash3(cols: Column*): Column = Column.fn("xxhash3", cols: _*)
+
+  /**
+   * Calculates the hash code of given columns using the 128-bit variant of the xxHash3
+   * algorithm, and returns the result as a 16-byte binary column. The hash computation uses
+   * the reference seed of 0.
+   *
+   * @group hash_funcs
+   * @since 4.3.0
+   */
+  @scala.annotation.varargs
+  def xxhash128(cols: Column*): Column = Column.fn("xxhash128", cols: _*)
+
+  /**
    * Calculates the hash code of given columns using the 64-bit variant of the xxHash algorithm,
    * and returns the result as a long column. The hash computation uses an initial seed of 42.
    *
