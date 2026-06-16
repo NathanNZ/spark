@@ -349,7 +349,9 @@ Hash Functions
     sha
     sha1
     sha2
+    xxhash3
     xxhash64
+    xxhash128
 
 
 Collection Functions

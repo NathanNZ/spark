@@ -2526,6 +2526,18 @@ class SparkConnectFunctionTests(ReusedMixedTestCase, PandasOnSparkTestUtils):
             sdf.select(SF.xxhash64(sdf.a, "b", sdf.c)).toPandas(),
         )
 
+        # test xxhash3
+        self.assert_eq(
+            cdf.select(CF.xxhash3(cdf.a, "b", cdf.c)).toPandas(),
+            sdf.select(SF.xxhash3(sdf.a, "b", sdf.c)).toPandas(),
+        )
+
+        # test xxhash128
+        self.assert_eq(
+            cdf.select(CF.xxhash128(cdf.a, "b", cdf.c)).toPandas(),
+            sdf.select(SF.xxhash128(sdf.a, "b", sdf.c)).toPandas(),
+        )
+
         # test md5
         self.assert_eq(
             cdf.select(CF.md5(cdf.d), CF.md5("c")).toPandas(),
