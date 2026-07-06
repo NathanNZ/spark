@@ -4614,6 +4614,20 @@ def xxhash64(*cols: "ColumnOrName") -> Column:
 xxhash64.__doc__ = pysparkfuncs.xxhash64.__doc__
 
 
+def xxhash3(*cols: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("xxhash3", *cols)
+
+
+xxhash3.__doc__ = pysparkfuncs.xxhash3.__doc__
+
+
+def xxhash128(*cols: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("xxhash128", *cols)
+
+
+xxhash128.__doc__ = pysparkfuncs.xxhash128.__doc__
+
+
 def md5(col: "ColumnOrName") -> Column:
     return _invoke_function_over_columns("md5", col)
 

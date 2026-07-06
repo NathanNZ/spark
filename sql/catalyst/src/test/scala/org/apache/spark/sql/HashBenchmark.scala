@@ -26,7 +26,7 @@ import org.apache.spark.sql.types._
 
 /**
  * Benchmark for the previous interpreted hash function(InternalRow.hashCode) vs codegened
- * hash expressions (Murmur3Hash/xxHash64).
+ * hash expressions (Murmur3Hash/xxHash64/XxHash3/XxHash128).
  * To run this benchmark:
  * {{{
  *   1. without sbt:
@@ -82,6 +82,31 @@ object HashBenchmark extends BenchmarkBase {
           var i = 0
           while (i < numRows) {
             sum += getHashCode64b(rows(i)).getInt(0)
+            i += 1
+          }
+        }
+      }
+
+      val getHashCodeXXH3 = UnsafeProjection.create(new XxHash3(attrs) :: Nil, attrs)
+      benchmark.addCase("codegen XXH3 64-bit") { _: Int =>
+        var sum = 0
+        for (_ <- 0L until iters) {
+          var i = 0
+          while (i < numRows) {
+            sum += getHashCodeXXH3(rows(i)).getLong(0).toInt
+            i += 1
+          }
+        }
+      }
+
+      val getHashCodeXXH128 = UnsafeProjection.create(new XxHash128(attrs) :: Nil, attrs)
+      benchmark.addCase("codegen XXH3 128-bit") { _: Int =>
+        var sum = 0
+        for (_ <- 0L until iters) {
+          var i = 0
+          while (i < numRows) {
+            val bytes = getHashCodeXXH128(rows(i)).getBinary(0)
+            sum += bytes(0) ^ bytes(8)
             i += 1
           }
         }

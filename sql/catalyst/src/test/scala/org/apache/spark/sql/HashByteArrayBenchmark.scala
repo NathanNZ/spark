@@ -20,12 +20,12 @@ package org.apache.spark.sql
 import java.util.Random
 
 import org.apache.spark.benchmark.{Benchmark, BenchmarkBase}
-import org.apache.spark.sql.catalyst.expressions.{HiveHasher, XXH64}
+import org.apache.spark.sql.catalyst.expressions.{HiveHasher, XXH3, XXH64}
 import org.apache.spark.unsafe.Platform
 import org.apache.spark.unsafe.hash.Murmur3_x86_32
 
 /**
- * Synthetic benchmark for MurMurHash 3 and xxHash64.
+ * Synthetic benchmark for MurMurHash 3, xxHash64, and XXH3.
  * To run this benchmark:
  * {{{
  *   1. without sbt:
@@ -69,6 +69,17 @@ object HashByteArrayBenchmark extends BenchmarkBase {
       }
     }
 
+    benchmark.addCase("XXH3 64-bit") { _: Int =>
+      var sum = 0L
+      for (_ <- 0L until iters) {
+        var i = 0
+        while (i < numArrays) {
+          sum += XXH3.hashUnsafeBytes64(arrays(i), Platform.BYTE_ARRAY_OFFSET, length, 42L)
+          i += 1
+        }
+      }
+    }
+
     benchmark.addCase("HiveHasher") { _: Int =>
       var sum = 0L
       for (_ <- 0L until iters) {
@@ -84,7 +95,7 @@ object HashByteArrayBenchmark extends BenchmarkBase {
   }
 
   override def runBenchmarkSuite(mainArgs: Array[String]): Unit = {
-    runBenchmark("Benchmark for MurMurHash 3 and xxHash64") {
+    runBenchmark("Benchmark for MurMurHash 3, xxHash64, and XXH3") {
       test(8, 42L, 1 << 10, 1 << 11)
       test(16, 42L, 1 << 10, 1 << 11)
       test(24, 42L, 1 << 10, 1 << 11)

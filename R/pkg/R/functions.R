@@ -972,6 +972,26 @@ setMethod("hash",
           })
 
 #' @details
+#' \code{xxhash3}: Calculates the hash code of given columns using the 64-bit
+#' variant of the xxHash3 algorithm, and returns the result as a long column.
+#' The hash computation uses an initial seed of 0. Interior null values perturb
+#' the result; trailing null values are invariant. All-null inputs return 0.
+#'
+#' @rdname column_misc_functions
+#' @aliases xxhash3 xxhash3,Column-method
+#' @note xxhash3 since 4.3.0
+setMethod("xxhash3",
+          signature(x = "Column"),
+          function(x, ...) {
+            jcols <- lapply(list(x, ...), function(x) {
+              stopifnot(class(x) == "Column")
+              x@jc
+            })
+            jc <- callJStatic("org.apache.spark.sql.functions", "xxhash3", jcols)
+            column(jc)
+          })
+
+#' @details
 #' \code{xxhash64}: Calculates the hash code of given columns using the 64-bit
 #' variant of the xxHash algorithm, and returns the result as a long
 #' column. The hash computation uses an initial seed of 42.
@@ -987,6 +1007,27 @@ setMethod("xxhash64",
               x@jc
             })
             jc <- callJStatic("org.apache.spark.sql.functions", "xxhash64", jcols)
+            column(jc)
+          })
+
+#' @details
+#' \code{xxhash128}: Calculates the hash code of given columns using the 128-bit
+#' variant of the xxHash3 algorithm, and returns the result as a 16-byte binary
+#' column (big-endian high64 || low64). The hash computation uses an initial seed
+#' of 0. Interior null values perturb the result; trailing null values are
+#' invariant. All-null inputs return 16 zero bytes.
+#'
+#' @rdname column_misc_functions
+#' @aliases xxhash128 xxhash128,Column-method
+#' @note xxhash128 since 4.3.0
+setMethod("xxhash128",
+          signature(x = "Column"),
+          function(x, ...) {
+            jcols <- lapply(list(x, ...), function(x) {
+              stopifnot(class(x) == "Column")
+              x@jc
+            })
+            jc <- callJStatic("org.apache.spark.sql.functions", "xxhash128", jcols)
             column(jc)
           })
 

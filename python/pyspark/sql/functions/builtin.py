@@ -14384,6 +14384,78 @@ def xxhash64(*cols: "ColumnOrName") -> Column:
 
 
 @_try_remote_functions
+def xxhash3(*cols: "ColumnOrName") -> Column:
+    """Calculates the hash code of given columns using the 64-bit variant of the xxHash3
+    algorithm, and returns the result as a long column. The hash computation uses the reference
+    seed of 0.
+
+    .. versionadded:: 4.3.0
+
+    .. versionchanged:: 4.3.0
+        Supports Spark Connect.
+
+    Parameters
+    ----------
+    cols : :class:`~pyspark.sql.Column` or column name
+        one or more columns to compute on.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        hash value as long column.
+
+    See Also
+    --------
+    :meth:`pyspark.sql.functions.xxhash128`
+
+    Examples
+    --------
+    >>> import pyspark.sql.functions as sf
+    >>> df = spark.createDataFrame([("hello",)], ["c"])
+    >>> df.select(sf.xxhash3("c").alias("h")).collect()
+    [Row(h=-7685981735718036227)]
+
+    """
+    return _invoke_function_over_seq_of_columns("xxhash3", cols)
+
+
+@_try_remote_functions
+def xxhash128(*cols: "ColumnOrName") -> Column:
+    """Calculates the hash code of given columns using the 128-bit variant of the xxHash3
+    algorithm, and returns the result as a binary column. The hash computation uses the reference
+    seed of 0.
+
+    .. versionadded:: 4.3.0
+
+    .. versionchanged:: 4.3.0
+        Supports Spark Connect.
+
+    Parameters
+    ----------
+    cols : :class:`~pyspark.sql.Column` or column name
+        one or more columns to compute on.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        hash value as binary column.
+
+    See Also
+    --------
+    :meth:`pyspark.sql.functions.xxhash3`
+
+    Examples
+    --------
+    >>> import pyspark.sql.functions as sf
+    >>> df = spark.createDataFrame([("Spark",)], ["c"])
+    >>> df.select(sf.hex(sf.xxhash128("c")).alias("h")).collect()
+    [Row(h='7D57DD84C60C86CA1F4E82AB91A12B5E')]
+
+    """
+    return _invoke_function_over_seq_of_columns("xxhash128", cols)
+
+
+@_try_remote_functions
 def assert_true(col: "ColumnOrName", errMsg: Optional[Union[Column, str]] = None) -> Column:
     """
     Returns `null` if the input column is `true`; throws an exception
