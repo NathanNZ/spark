@@ -158,6 +158,19 @@ class FunctionsTestsMixin:
         unknonw_set = all_set - (fn_set | clz_set)
         self.assertEqual(unknonw_set, set())
 
+    def test_xxhash3_and_xxhash128(self):
+        df = self.spark.createDataFrame([("hello", "Spark")], ["c1", "c2"])
+
+        result = df.select(
+            F.xxhash3("c1").alias("h3"),
+            F.hex(F.xxhash128("c2")).alias("h128"),
+        ).collect()
+
+        self.assertEqual(
+            result,
+            [Row(h3=-7685981735718036227, h128="7D57DD84C60C86CA1F4E82AB91A12B5E")],
+        )
+
     def test_explode(self):
         d = [
             Row(a=1, intlist=[1, 2, 3], mapfield={"a": "b"}),

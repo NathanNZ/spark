@@ -182,6 +182,26 @@ class DataFrameSuite extends SharedSparkSession
       structDf.select(xxhash64($"a", $"record.*")))
   }
 
+  test("Star Expansion - xxhash3") {
+    val structDf = testData2.select("a", "b").as("record")
+    checkAnswer(
+      structDf.groupBy($"a", $"b").agg(min(xxhash3($"a", $"*"))),
+      structDf.groupBy($"a", $"b").agg(min(xxhash3($"a", $"a", $"b"))))
+    checkAnswer(
+      structDf.select(xxhash3($"*")),
+      structDf.select(xxhash3($"record.*")))
+  }
+
+  test("Star Expansion - xxhash128") {
+    val structDf = testData2.select("a", "b").as("record")
+    checkAnswer(
+      structDf.groupBy($"a", $"b").agg(min(xxhash128($"a", $"*"))),
+      structDf.groupBy($"a", $"b").agg(min(xxhash128($"a", $"a", $"b"))))
+    checkAnswer(
+      structDf.select(xxhash128($"*")),
+      structDf.select(xxhash128($"record.*")))
+  }
+
   test("SPARK-28067: sum of null decimal values") {
     Seq("true", "false").foreach { wholeStageEnabled =>
       withSQLConf((SQLConf.WHOLESTAGE_CODEGEN_ENABLED.key, wholeStageEnabled)) {

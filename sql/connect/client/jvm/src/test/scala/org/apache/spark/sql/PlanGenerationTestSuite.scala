@@ -1719,6 +1719,14 @@ class PlanGenerationTestSuite extends ConnectFunSuite with Logging {
     fn.xxhash64(fn.col("id"), fn.col("a"), fn.col("d"), fn.col("g"))
   }
 
+  functionTest("xxhash3") {
+    fn.xxhash3(fn.col("id"), fn.col("a"), fn.col("d"), fn.col("g"))
+  }
+
+  functionTest("xxhash128") {
+    fn.xxhash128(fn.col("id"), fn.col("a"), fn.col("d"), fn.col("g"))
+  }
+
   functionTest("assert_true with message") {
     fn.assert_true(fn.col("id") > 0, lit("id negative!"))
   }

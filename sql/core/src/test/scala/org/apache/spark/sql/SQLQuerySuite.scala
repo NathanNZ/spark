@@ -2106,6 +2106,64 @@ class SQLQuerySuite extends SharedSparkSession with AdaptiveSparkPlanHelper
     }
   }
 
+  test("xxhash3 function: Scala API matches SQL form") {
+    val df = Seq(1 -> "a", 2 -> "b").toDF("i", "j")
+    withTempView("tbl") {
+      df.createOrReplaceTempView("tbl")
+      checkAnswer(
+        df.select(xxhash3($"i", $"j")),
+        sql("SELECT xxhash3(i, j) from tbl")
+      )
+    }
+  }
+
+  test("xxhash128 function: Scala API matches SQL form") {
+    val df = Seq(1 -> "a", 2 -> "b").toDF("i", "j")
+    withTempView("tbl") {
+      df.createOrReplaceTempView("tbl")
+      checkAnswer(
+        df.select(xxhash128($"i", $"j")),
+        sql("SELECT xxhash128(i, j) from tbl")
+      )
+    }
+  }
+
+  test("xxhash3 MapType: insertion-order independent") {
+    val rows = Seq(Map("alpha" -> 1, "bravo" -> 2), Map("bravo" -> 2, "alpha" -> 1))
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(rows.map(m => org.apache.spark.sql.Row(m))),
+      org.apache.spark.sql.types.StructType(Seq(
+        org.apache.spark.sql.types.StructField(
+          "m", org.apache.spark.sql.types.MapType(
+            org.apache.spark.sql.types.StringType,
+            org.apache.spark.sql.types.IntegerType)))))
+    val hashes = df.select(xxhash3($"m")).collect()
+    assert(hashes(0).getLong(0) === hashes(1).getLong(0))
+  }
+
+  test("xxhash128 MapType: insertion-order independent") {
+    val rows = Seq(Map("alpha" -> 1, "bravo" -> 2), Map("bravo" -> 2, "alpha" -> 1))
+    val df = spark.createDataFrame(
+      spark.sparkContext.parallelize(rows.map(m => org.apache.spark.sql.Row(m))),
+      org.apache.spark.sql.types.StructType(Seq(
+        org.apache.spark.sql.types.StructField(
+          "m", org.apache.spark.sql.types.MapType(
+            org.apache.spark.sql.types.StringType,
+            org.apache.spark.sql.types.IntegerType)))))
+    val hashes = df.select(xxhash128($"m")).collect()
+    assert(java.util.Arrays.equals(hashes(0).getAs[Array[Byte]](0), hashes(1).getAs[Array[Byte]](0)))
+  }
+
+  test("xxhash3 VariantType: accepted end-to-end") {
+    val result = sql("""SELECT xxhash3(parse_json('{"a":1,"b":2}'))""").collect()
+    assert(result.length == 1 && !result(0).isNullAt(0))
+  }
+
+  test("xxhash128 VariantType: accepted end-to-end") {
+    val result = sql("""SELECT xxhash128(parse_json('{"a":1,"b":2}'))""").collect()
+    assert(result.length == 1 && !result(0).isNullAt(0))
+  }
+
   test("join with using clause") {
     val df1 = Seq(("r1c1", "r1c2", "t1r1c3"),
       ("r2c1", "r2c2", "t1r2c3"), ("r3c1x", "r3c2", "t1r3c3")).toDF("c1", "c2", "c3")

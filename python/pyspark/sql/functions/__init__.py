@@ -292,6 +292,8 @@ __all__ = [  # noqa: F405
     "sha",
     "sha1",
     "sha2",
+    "xxhash3",
+    "xxhash128",
     "xxhash64",
     # Collection Functions
     "aggregate",
