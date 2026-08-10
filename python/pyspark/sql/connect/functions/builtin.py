@@ -4729,18 +4729,25 @@ def md5(col: "ColumnOrName") -> Column:
 md5.__doc__ = pysparkfuncs.md5.__doc__
 
 
-def xxh3_64(col: "ColumnOrName") -> Column:
-    return _invoke_function_over_columns("xxh3_64", col)
+def xxh3_64(*cols: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("xxh3_64", *cols)
 
 
 xxh3_64.__doc__ = pysparkfuncs.xxh3_64.__doc__
 
 
-def xxh3_128(col: "ColumnOrName") -> Column:
-    return _invoke_function_over_columns("xxh3_128", col)
+def xxh3_128(*cols: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("xxh3_128", *cols)
 
 
 xxh3_128.__doc__ = pysparkfuncs.xxh3_128.__doc__
+
+
+def xxh3_128_hex(*cols: "ColumnOrName") -> Column:
+    return _invoke_function_over_columns("xxh3_128_hex", *cols)
+
+
+xxh3_128_hex.__doc__ = pysparkfuncs.xxh3_128_hex.__doc__
 
 
 def sha1(col: "ColumnOrName") -> Column:

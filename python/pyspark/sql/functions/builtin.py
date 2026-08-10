@@ -14827,18 +14827,18 @@ def md5(col: "ColumnOrName") -> Column:
 
 
 @_try_remote_functions
-def xxh3_64(col: "ColumnOrName") -> Column:
-    """Returns a 64-bit hash value of the argument using the XXH3 algorithm.
+def xxh3_64(*cols: "ColumnOrName") -> Column:
+    """Returns a 64-bit XXH3 hash of one or more columns as a long value.
 
-    Unlike :func:`xxhash64`, which hashes one or more columns structurally, this hashes the raw
-    bytes of a single value with seed 0, so its result is byte compatible with the reference XXH3.
+    A unary null returns null. With multiple columns, nulls are included structurally according
+    to their position and run length.
 
-    .. versionadded:: 4.4.0
+    .. versionadded:: 4.3.0
 
     Parameters
     ----------
-    col : :class:`~pyspark.sql.Column` or column name
-        The target column to hash, which must have string or binary type.
+    cols : :class:`~pyspark.sql.Column` or column name
+        One or more columns to hash.
 
     Returns
     -------
@@ -14857,19 +14857,55 @@ def xxh3_64(col: "ColumnOrName") -> Column:
     >>> df.select(sf.xxh3_64('a').alias('h')).collect()
     [Row(h=80997306238743657)]
     """
-    return _invoke_function_over_columns("xxh3_64", col)
+    return _invoke_function_over_seq_of_columns("xxh3_64", cols)
 
 
 @_try_remote_functions
-def xxh3_128(col: "ColumnOrName") -> Column:
-    """Returns a 128-bit XXH3 hash of the argument as a 32-character hex string.
+def xxh3_128(*cols: "ColumnOrName") -> Column:
+    """Returns a 128-bit XXH3 hash of one or more columns as a 16-byte binary value.
 
-    .. versionadded:: 4.4.0
+    A unary null returns null. With multiple columns, nulls are included structurally according
+    to their position and run length.
+
+    .. versionadded:: 4.3.0
 
     Parameters
     ----------
-    col : :class:`~pyspark.sql.Column` or column name
-        The target column to hash, which must have string or binary type.
+    cols : :class:`~pyspark.sql.Column` or column name
+        One or more columns to hash.
+
+    Returns
+    -------
+    :class:`~pyspark.sql.Column`
+        Returns a column that evaluates to binary.
+
+    See Also
+    --------
+    :meth:`pyspark.sql.functions.xxh3_64`
+
+    Examples
+    --------
+    >>> import pyspark.sql.functions as sf
+    >>> df = spark.createDataFrame([('Spark',)], ['a'])
+    >>> df.select(sf.hex(sf.xxh3_128('a')).alias('h')).collect()
+    [Row(h='7D57DD84C60C86CA1F4E82AB91A12B5E')]
+    """
+    return _invoke_function_over_seq_of_columns("xxh3_128", cols)
+
+
+@_try_remote_functions
+def xxh3_128_hex(*cols: "ColumnOrName") -> Column:
+    """Returns a 128-bit XXH3 hash as a 32-character lowercase hexadecimal string.
+
+    A unary null returns null. With multiple columns, nulls are included structurally according
+    to their position and run length.
+
+    .. versionadded:: 4.3.0
+
+    Parameters
+    ----------
+    cols : :class:`~pyspark.sql.Column` or column name
+        One or more columns to hash.
 
     Returns
     -------
@@ -14878,17 +14914,16 @@ def xxh3_128(col: "ColumnOrName") -> Column:
 
     See Also
     --------
-    :meth:`pyspark.sql.functions.xxh3_64`
-    :meth:`pyspark.sql.functions.md5`
+    :meth:`pyspark.sql.functions.xxh3_128`
 
     Examples
     --------
     >>> import pyspark.sql.functions as sf
     >>> df = spark.createDataFrame([('Spark',)], ['a'])
-    >>> df.select(sf.xxh3_128('a').alias('h')).collect()
+    >>> df.select(sf.xxh3_128_hex('a').alias('h')).collect()
     [Row(h='7d57dd84c60c86ca1f4e82ab91a12b5e')]
     """
-    return _invoke_function_over_columns("xxh3_128", col)
+    return _invoke_function_over_seq_of_columns("xxh3_128_hex", cols)
 
 
 @_try_remote_functions

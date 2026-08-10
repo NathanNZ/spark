@@ -13,7 +13,7 @@
     },
     "expressions": [{
       "unresolvedFunction": {
-        "functionName": "xxh3_128",
+        "functionName": "xxh3_128_hex",
         "arguments": [{
           "unresolvedAttribute": {
             "unparsedIdentifier": "id"
@@ -107,7 +107,7 @@
             "stackTrace": [{
               "classLoaderName": "app",
               "declaringClass": "org.apache.spark.sql.functions$",
-              "methodName": "xxh3_128",
+              "methodName": "xxh3_128_hex",
               "fileName": "functions.scala"
             }, {
               "classLoaderName": "app",

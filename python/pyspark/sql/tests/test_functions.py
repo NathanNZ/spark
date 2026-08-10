@@ -158,6 +158,28 @@ class FunctionsTestsMixin:
         unknonw_set = all_set - (fn_set | clz_set)
         self.assertEqual(unknonw_set, set())
 
+    def test_xxh3_functions(self):
+        df = self.spark.createDataFrame([("hello", "Spark")], ["c1", "c2"])
+
+        result = df.select(
+            F.xxh3_64("c1").alias("h3"),
+            F.xxh3_128("c2").alias("h128_bytes"),
+            F.hex(F.xxh3_128("c2")).alias("h128"),
+            F.xxh3_128_hex("c2").alias("h128_lower"),
+        ).collect()
+
+        self.assertEqual(
+            result,
+            [
+                Row(
+                    h3=-7685981735718036227,
+                    h128_bytes=bytes.fromhex("7d57dd84c60c86ca1f4e82ab91a12b5e"),
+                    h128="7D57DD84C60C86CA1F4E82AB91A12B5E",
+                    h128_lower="7d57dd84c60c86ca1f4e82ab91a12b5e",
+                )
+            ],
+        )
+
     def test_explode(self):
         d = [
             Row(a=1, intlist=[1, 2, 3], mapfield={"a": "b"}),

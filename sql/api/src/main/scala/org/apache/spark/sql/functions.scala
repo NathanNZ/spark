@@ -6641,28 +6641,47 @@ object functions {
   def xxhash64(cols: Column*): Column = Column.fn("xxhash64", cols: _*)
 
   /**
-   * Returns a 64-bit hash value of the argument using the XXH3 algorithm.
+  * Returns a 64-bit XXH3 hash of one or more columns as a long value.
    *
-   * @param col
-   *   the column to hash, which must have string or binary type.
+  * @param cols
+  *   one or more columns to hash. A unary null returns null; with multiple columns, nulls are
+  *   included structurally according to their position.
    * @group hash_funcs
-   * @since 4.4.0
+  * @since 4.3.0
    * @return
    *   Returns a column that evaluates to a long.
    */
-  def xxh3_64(col: Column): Column = Column.fn("xxh3_64", col)
+  @scala.annotation.varargs
+  def xxh3_64(cols: Column*): Column = Column.fn("xxh3_64", cols: _*)
 
   /**
-   * Returns a 128-bit XXH3 hash of the argument as a 32-character hex string.
+   * Returns a 128-bit XXH3 hash of one or more columns as a 16-byte binary value.
    *
-   * @param col
-   *   the column to hash, which must have string or binary type.
+   * @param cols
+   *   one or more columns to hash. A unary null returns null; with multiple columns, nulls are
+   *   included structurally according to their position.
    * @group hash_funcs
-   * @since 4.4.0
+   * @since 4.3.0
+   * @return
+   *   Returns a column that evaluates to binary.
+   */
+  @scala.annotation.varargs
+  def xxh3_128(cols: Column*): Column = Column.fn("xxh3_128", cols: _*)
+
+  /**
+   * Returns a 128-bit XXH3 hash of one or more columns as a 32-character lowercase hexadecimal
+   * string.
+   *
+   * @param cols
+   *   one or more columns to hash. A unary null returns null; with multiple columns, nulls are
+   *   included structurally according to their position.
+   * @group hash_funcs
+   * @since 4.3.0
    * @return
    *   Returns a column that evaluates to a string.
    */
-  def xxh3_128(col: Column): Column = Column.fn("xxh3_128", col)
+  @scala.annotation.varargs
+  def xxh3_128_hex(cols: Column*): Column = Column.fn("xxh3_128_hex", cols: _*)
 
   /**
    * Returns null if the condition is true, and throws an exception otherwise.

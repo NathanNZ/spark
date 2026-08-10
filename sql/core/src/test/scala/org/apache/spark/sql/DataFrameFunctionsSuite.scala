@@ -671,14 +671,21 @@ class DataFrameFunctionsSuite extends SharedSparkSession {
       Row(2615927343983396622L, -4044731995552965649L))
     checkAnswer(
       df.select(xxh3_128($"a"), xxh3_128($"b")),
-      Row("9e947f00ecd6acb2244da40f405c870e", "866737830f560dbf3e1f439d2d785f44"))
+      Row(
+        java.util.HexFormat.of().parseHex("9e947f00ecd6acb2244da40f405c870e"),
+        java.util.HexFormat.of().parseHex("866737830f560dbf3e1f439d2d785f44")))
+    checkAnswer(
+      df.select(hex(xxh3_128($"a")), hex(xxh3_128($"b"))),
+      Row("9E947F00ECD6ACB2244DA40F405C870E", "866737830F560DBF3E1F439D2D785F44"))
 
     checkAnswer(
       df.selectExpr("xxh3_64(a)", "xxh3_64(b)"),
       Row(2615927343983396622L, -4044731995552965649L))
     checkAnswer(
       df.selectExpr("xxh3_128(a)", "xxh3_128(b)"),
-      Row("9e947f00ecd6acb2244da40f405c870e", "866737830f560dbf3e1f439d2d785f44"))
+      Row(
+        java.util.HexFormat.of().parseHex("9e947f00ecd6acb2244da40f405c870e"),
+        java.util.HexFormat.of().parseHex("866737830f560dbf3e1f439d2d785f44")))
   }
 
   test("misc aes function") {
@@ -5989,6 +5996,71 @@ class DataFrameFunctionsSuite extends SharedSparkSession {
       sqlState = None,
       parameters = Map(
         "functionName" -> "`xxhash64`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select(xxh3_64())
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxh3_64`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.selectExpr("xxh3_64()")
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxh3_64`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select(xxh3_128_hex())
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxh3_128_hex`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.select(xxh3_128())
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxh3_128`",
+        "expectedNum" -> "> 0",
+        "actualNum" -> "0",
+        "docroot" -> SPARK_DOC_ROOT)
+    )
+
+    checkError(
+      exception = intercept[AnalysisException] {
+        df.selectExpr("xxh3_128()")
+      },
+      condition = "WRONG_NUM_ARGS.WITHOUT_SUGGESTION",
+      sqlState = None,
+      parameters = Map(
+        "functionName" -> "`xxh3_128`",
         "expectedNum" -> "> 0",
         "actualNum" -> "0",
         "docroot" -> SPARK_DOC_ROOT)

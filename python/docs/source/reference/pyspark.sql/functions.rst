@@ -353,6 +353,7 @@ Hash Functions
     sha1
     sha2
     xxh3_128
+    xxh3_128_hex
     xxh3_64
     xxhash64
 

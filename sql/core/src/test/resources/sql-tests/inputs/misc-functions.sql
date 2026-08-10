@@ -62,8 +62,14 @@ SELECT hmac('key', 'message', 'SHA-3');
 -- xxh3_64 and xxh3_128
 SELECT xxh3_64('Spark');
 SELECT xxh3_64(CAST('Spark' AS BINARY));
-SELECT xxh3_128('Spark');
-SELECT xxh3_128(CAST('Spark' AS BINARY));
+SELECT hex(xxh3_128('Spark'));
+SELECT length(xxh3_128('Spark')), hex(xxh3_128(CAST('Spark' AS BINARY)));
+SELECT xxh3_128_hex('Spark');
+SELECT xxh3_64('Spark', 1, NULL);
+SELECT xxh3_128_hex('Spark', 1, NULL);
+SELECT length(xxh3_128('Spark', 1, NULL)), hex(xxh3_128('Spark', 1, NULL));
 -- Null propagation.
 SELECT xxh3_64(CAST(NULL AS STRING));
 SELECT xxh3_128(CAST(NULL AS BINARY));
+-- nulls are structural when hashing multiple arguments
+SELECT xxh3_64(NULL, NULL), length(xxh3_128(NULL, NULL)), hex(xxh3_128(NULL, NULL));

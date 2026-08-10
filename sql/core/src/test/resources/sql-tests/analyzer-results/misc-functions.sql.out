@@ -301,7 +301,7 @@ Project [hmac(cast(key as binary), cast(message as binary), SHA-3) AS hmac(key, 
 -- !query
 SELECT xxh3_64('Spark')
 -- !query analysis
-Project [xxh3_64(cast(Spark as binary)) AS xxh3_64(Spark)#xL]
+Project [xxh3_64(Spark) AS xxh3_64(Spark)#xL]
 +- OneRowRelation
 
 
@@ -313,23 +313,51 @@ Project [xxh3_64(cast(Spark as binary)) AS xxh3_64(CAST(Spark AS BINARY))#xL]
 
 
 -- !query
-SELECT xxh3_128('Spark')
+SELECT hex(xxh3_128('Spark'))
 -- !query analysis
-Project [xxh3_128(cast(Spark as binary)) AS xxh3_128(Spark)#x]
+Project [hex(xxh3_128(Spark)) AS hex(xxh3_128(Spark))#x]
 +- OneRowRelation
 
 
 -- !query
-SELECT xxh3_128(CAST('Spark' AS BINARY))
+SELECT length(xxh3_128('Spark')), hex(xxh3_128(CAST('Spark' AS BINARY)))
 -- !query analysis
-Project [xxh3_128(cast(Spark as binary)) AS xxh3_128(CAST(Spark AS BINARY))#x]
+Project [length(xxh3_128(Spark)) AS length(xxh3_128(Spark))#x, hex(xxh3_128(cast(Spark as binary))) AS hex(xxh3_128(CAST(Spark AS BINARY)))#x]
++- OneRowRelation
+
+
+-- !query
+SELECT xxh3_128_hex('Spark')
+-- !query analysis
+Project [xxh3_128_hex(Spark) AS xxh3_128_hex(Spark)#x]
++- OneRowRelation
+
+
+-- !query
+SELECT xxh3_64('Spark', 1, NULL)
+-- !query analysis
+Project [xxh3_64(Spark, 1, null) AS xxh3_64(Spark, 1, NULL)#xL]
++- OneRowRelation
+
+
+-- !query
+SELECT xxh3_128_hex('Spark', 1, NULL)
+-- !query analysis
+Project [xxh3_128_hex(Spark, 1, null) AS xxh3_128_hex(Spark, 1, NULL)#x]
++- OneRowRelation
+
+
+-- !query
+SELECT length(xxh3_128('Spark', 1, NULL)), hex(xxh3_128('Spark', 1, NULL))
+-- !query analysis
+Project [length(xxh3_128(Spark, 1, null)) AS length(xxh3_128(Spark, 1, NULL))#x, hex(xxh3_128(Spark, 1, null)) AS hex(xxh3_128(Spark, 1, NULL))#x]
 +- OneRowRelation
 
 
 -- !query
 SELECT xxh3_64(CAST(NULL AS STRING))
 -- !query analysis
-Project [xxh3_64(cast(cast(null as string) as binary)) AS xxh3_64(CAST(NULL AS STRING))#xL]
+Project [xxh3_64(cast(null as string)) AS xxh3_64(CAST(NULL AS STRING))#xL]
 +- OneRowRelation
 
 
@@ -337,4 +365,11 @@ Project [xxh3_64(cast(cast(null as string) as binary)) AS xxh3_64(CAST(NULL AS S
 SELECT xxh3_128(CAST(NULL AS BINARY))
 -- !query analysis
 Project [xxh3_128(cast(null as binary)) AS xxh3_128(CAST(NULL AS BINARY))#x]
++- OneRowRelation
+
+
+-- !query
+SELECT xxh3_64(NULL, NULL), length(xxh3_128(NULL, NULL)), hex(xxh3_128(NULL, NULL))
+-- !query analysis
+Project [xxh3_64(null, null) AS xxh3_64(NULL, NULL)#xL, length(xxh3_128(null, null)) AS length(xxh3_128(NULL, NULL))#x, hex(xxh3_128(null, null)) AS hex(xxh3_128(NULL, NULL))#x]
 +- OneRowRelation

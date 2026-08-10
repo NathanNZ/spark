@@ -1716,11 +1716,15 @@ class PlanGenerationTestSuite extends ConnectFunSuite with Logging {
   }
 
   functionTest("xxh3_64") {
-    fn.xxh3_64(fn.col("g").cast("binary"))
+    fn.xxh3_64(fn.col("id"), fn.col("a"), fn.col("d"), fn.col("g"))
   }
 
   functionTest("xxh3_128") {
-    fn.xxh3_128(fn.col("g").cast("binary"))
+    fn.xxh3_128(fn.col("id"), fn.col("a"), fn.col("d"), fn.col("g"))
+  }
+
+  functionTest("xxh3_128_hex") {
+    fn.xxh3_128_hex(fn.col("id"), fn.col("a"), fn.col("d"), fn.col("g"))
   }
 
   functionTest("hash") {

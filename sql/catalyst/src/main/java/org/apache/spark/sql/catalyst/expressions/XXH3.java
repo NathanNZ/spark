@@ -17,556 +17,1345 @@
 
 package org.apache.spark.sql.catalyst.expressions;
 
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.VarHandle;
+import java.nio.ByteOrder;
 import java.util.HexFormat;
+import java.util.Objects;
 
+import org.apache.spark.unsafe.Platform;
 import org.apache.spark.unsafe.types.UTF8String;
 
+// scalastyle: off
 /**
- * A Java port of the XXH3 64-bit and 128-bit hash functions (from the reference implementation at
- * https://github.com/Cyan4973/xxHash, as specified in doc/xxhash_spec.md). The output is byte
- * compatible with the reference implementation, so it matches `xxhsum` and other XXH3 tools.
- *
- * <p>The multiplication and mixing machinery operates on 64-bit lanes; Java's signed
- * {@code long} is used as an unsigned 64-bit integer throughout ({@code >>>} for logical shift,
- * {@link Long#rotateLeft}, and {@link #unsignedMultiplyHigh} for the high half of 64x64
- * products). The 128-bit hash's 1-3 byte inputs are the exception: they are first composed as
- * 32-bit {@code int}s (see {@link #len1to3128}) before being widened.
+ * XXH3. High quality and fast 64-bit and 128-bit hash functions by Yann Collet.
+ * <p/>
+ * This was largely based on the following original C implementation and Java port:
+ * https://github.com/Cyan4973/xxHash/blob/dev/doc/xxhash_spec.md#xxh3-algorithm-overview
+ * https://github.com/NathanNZ/xxhash-java
  */
+// scalastyle: on
 public final class XXH3 {
 
-  private XXH3() {}
+  private static void checkOutput128(byte[] output) {
+    Objects.checkFromIndexSize(0, 16, output.length);
+  }
 
-  private static final long PRIME32_1 = 0x9E3779B1L;
-  private static final long PRIME32_2 = 0x85EBCA77L;
-  private static final long PRIME32_3 = 0xC2B2AE3DL;
-  private static final long PRIME64_1 = 0x9E3779B185EBCA87L;
-  private static final long PRIME64_2 = 0xC2B2AE3D27D4EB4FL;
-  private static final long PRIME64_3 = 0x165667B19E3779F9L;
-  private static final long PRIME64_4 = 0x85EBCA77C2B2AE63L;
-  private static final long PRIME64_5 = 0x27D4EB2F165667C5L;
+  private static final boolean IS_BIG_ENDIAN =
+      ByteOrder.nativeOrder().equals(ByteOrder.BIG_ENDIAN);
+
+  /** Absolute base offset for Platform reads into a byte[]. */
+  private static final long SEC_BASE = Platform.BYTE_ARRAY_OFFSET;
+
+  /** Pseudorandom secret taken directly from FARSH (from xxhash.h, XXH3_kSecret). */
+  private static final byte[] XXH3_kSecret = {
+    (byte)0xb8, (byte)0xfe, (byte)0x6c, (byte)0x39, (byte)0x23, (byte)0xa4, (byte)0x4b, (byte)0xbe,
+    (byte)0x7c, (byte)0x01, (byte)0x81, (byte)0x2c, (byte)0xf7, (byte)0x21, (byte)0xad, (byte)0x1c,
+    (byte)0xde, (byte)0xd4, (byte)0x6d, (byte)0xe9, (byte)0x83, (byte)0x90, (byte)0x97, (byte)0xdb,
+    (byte)0x72, (byte)0x40, (byte)0xa4, (byte)0xa4, (byte)0xb7, (byte)0xb3, (byte)0x67, (byte)0x1f,
+    (byte)0xcb, (byte)0x79, (byte)0xe6, (byte)0x4e, (byte)0xcc, (byte)0xc0, (byte)0xe5, (byte)0x78,
+    (byte)0x82, (byte)0x5a, (byte)0xd0, (byte)0x7d, (byte)0xcc, (byte)0xff, (byte)0x72, (byte)0x21,
+    (byte)0xb8, (byte)0x08, (byte)0x46, (byte)0x74, (byte)0xf7, (byte)0x43, (byte)0x24, (byte)0x8e,
+    (byte)0xe0, (byte)0x35, (byte)0x90, (byte)0xe6, (byte)0x81, (byte)0x3a, (byte)0x26, (byte)0x4c,
+    (byte)0x3c, (byte)0x28, (byte)0x52, (byte)0xbb, (byte)0x91, (byte)0xc3, (byte)0x00, (byte)0xcb,
+    (byte)0x88, (byte)0xd0, (byte)0x65, (byte)0x8b, (byte)0x1b, (byte)0x53, (byte)0x2e, (byte)0xa3,
+    (byte)0x71, (byte)0x64, (byte)0x48, (byte)0x97, (byte)0xa2, (byte)0x0d, (byte)0xf9, (byte)0x4e,
+    (byte)0x38, (byte)0x19, (byte)0xef, (byte)0x46, (byte)0xa9, (byte)0xde, (byte)0xac, (byte)0xd8,
+    (byte)0xa8, (byte)0xfa, (byte)0x76, (byte)0x3f, (byte)0xe3, (byte)0x9c, (byte)0x34, (byte)0x3f,
+    (byte)0xf9, (byte)0xdc, (byte)0xbb, (byte)0xc7, (byte)0xc7, (byte)0x0b, (byte)0x4f, (byte)0x1d,
+    (byte)0x8a, (byte)0x51, (byte)0xe0, (byte)0x4b, (byte)0xcd, (byte)0xb4, (byte)0x59, (byte)0x31,
+    (byte)0xc8, (byte)0x9f, (byte)0x7e, (byte)0xc9, (byte)0xd9, (byte)0x78, (byte)0x73, (byte)0x64,
+    (byte)0xea, (byte)0xc5, (byte)0xac, (byte)0x83, (byte)0x34, (byte)0xd3, (byte)0xeb, (byte)0xc3,
+    (byte)0xc5, (byte)0x81, (byte)0xa0, (byte)0xff, (byte)0xfa, (byte)0x13, (byte)0x63, (byte)0xeb,
+    (byte)0x17, (byte)0x0d, (byte)0xdd, (byte)0x51, (byte)0xb7, (byte)0xf0, (byte)0xda, (byte)0x49,
+    (byte)0xd3, (byte)0x16, (byte)0x55, (byte)0x26, (byte)0x29, (byte)0xd4, (byte)0x68, (byte)0x9e,
+    (byte)0x2b, (byte)0x16, (byte)0xbe, (byte)0x58, (byte)0x7d, (byte)0x47, (byte)0xa1, (byte)0xfc,
+    (byte)0x8f, (byte)0xf8, (byte)0xb8, (byte)0xd1, (byte)0x7a, (byte)0xd0, (byte)0x31, (byte)0xce,
+    (byte)0x45, (byte)0xcb, (byte)0x3a, (byte)0x8f, (byte)0x95, (byte)0x16, (byte)0x04, (byte)0x28,
+    (byte)0xaf, (byte)0xd7, (byte)0xfb, (byte)0xca, (byte)0xbb, (byte)0x4b, (byte)0x40, (byte)0x7e,
+  };
+
+  private static final long BITFLIP_64_4_8;
+  private static final long BITFLIP_128_4_8;
+  static {
+    BITFLIP_64_4_8  = getLE64(XXH3_kSecret, SEC_BASE + 8)  ^ getLE64(XXH3_kSecret, SEC_BASE + 16);
+    BITFLIP_128_4_8 = getLE64(XXH3_kSecret, SEC_BASE + 16) ^ getLE64(XXH3_kSecret, SEC_BASE + 24);
+  }
+
+  private static final int XXH3_SECRET_SIZE_MIN     = 136;
+  private static final int XXH3_SECRET_DEFAULT_SIZE = 192;
+  private static final int XXH_SECRET_MERGEACCS_START = 11;
+  private static final int XXH_SECRET_LASTACC_START   = 7;
+  private static final int XXH3_MIDSIZE_MAX         = 240;
+  private static final int XXH3_MIDSIZE_STARTOFFSET = 3;
+  private static final int XXH3_MIDSIZE_LASTOFFSET  = 17;
+
+  private static final long XXH_PRIME32_1 = 0x9E3779B1L;
+  private static final long XXH_PRIME32_2 = 0x85EBCA77L;
+  private static final long XXH_PRIME32_3 = 0xC2B2AE3DL;
+
+  private static final long XXH_PRIME64_1 = 0x9E3779B185EBCA87L;
+  private static final long XXH_PRIME64_2 = 0xC2B2AE3D27D4EB4FL;
+  private static final long XXH_PRIME64_3 = 0x165667B19E3779F9L;
+  private static final long XXH_PRIME64_4 = 0x85EBCA77C2B2AE63L;
+  private static final long XXH_PRIME64_5 = 0x27D4EB2F165667C5L;
+
   private static final long PRIME_MX1 = 0x165667919E3779F9L;
   private static final long PRIME_MX2 = 0x9FB21C651E98DF25L;
 
-  private static final int SECRET_SIZE = 192;
-  private static final int SECRET_SIZE_MIN = 136;
-  private static final int STRIPE_LEN = 64;
-  private static final int SECRET_MERGEACCS_START = 11;
-  private static final int SECRET_LASTACC_START = 7;
-  private static final int NB_STRIPES_PER_BLOCK = (SECRET_SIZE - STRIPE_LEN) / 8;
-  private static final int BLOCK_LEN = STRIPE_LEN * NB_STRIPES_PER_BLOCK;
+  private static final int XXH_STRIPE_LEN          = 64;
+  private static final int XXH_SECRET_CONSUME_RATE = 8;
 
-  // The default 192-byte secret from the reference implementation.
-  private static final byte[] SECRET = HexFormat.of().parseHex(
-      "b8fe6c3923a44bbe7c01812cf721ad1c" +
-      "ded46de9839097db7240a4a4b7b3671f" +
-      "cb79e64eccc0e578825ad07dccff7221" +
-      "b8084674f743248ee03590e6813a264c" +
-      "3c2852bb91c300cb88d0658b1b532ea3" +
-      "71644897a20df94e3819ef46a9deacd8" +
-      "a8fa763fe39c343ff9dcbbc7c70b4f1d" +
-      "8a51e04bcdb45931c89f7ec9d9787364" +
-      "eac5ac8334d3ebc3c581a0fffa1363eb" +
-      "170ddd51b7f0da49d316552629d4689e" +
-      "2b16be587d47a1fc8ff8b8d17ad031ce" +
-      "45cb3a8f95160428afd7fbcabb4b407e");
+  private static final int  NB_STRIPES_PER_BLOCK = 16;
+  private static final int  BLOCK_LEN            = XXH_STRIPE_LEN * NB_STRIPES_PER_BLOCK;
+  private static final long SCRAM_OFFSET         = XXH3_SECRET_DEFAULT_SIZE - XXH_STRIPE_LEN;
+  private static final long LAST_ACC_OFFSET      =
+      XXH3_SECRET_DEFAULT_SIZE - XXH_STRIPE_LEN - XXH_SECRET_LASTACC_START;
 
-  // ---- little-endian reads / writes ----
-
-  private static long readLE64(byte[] data, int offset) {
-    return (data[offset] & 0xFFL)
-        | ((data[offset + 1] & 0xFFL) << 8)
-        | ((data[offset + 2] & 0xFFL) << 16)
-        | ((data[offset + 3] & 0xFFL) << 24)
-        | ((data[offset + 4] & 0xFFL) << 32)
-        | ((data[offset + 5] & 0xFFL) << 40)
-        | ((data[offset + 6] & 0xFFL) << 48)
-        | ((data[offset + 7] & 0xFFL) << 56);
+  private static long getLE64(Object base, long off) {
+    long v = Platform.getLong(base, off);
+    return IS_BIG_ENDIAN ? Long.reverseBytes(v) : v;
   }
 
-  // Reads 4 little-endian bytes as an unsigned 32-bit value (in the low 32 bits of the result).
-  private static long readLE32(byte[] data, int offset) {
-    return (data[offset] & 0xFFL)
-        | ((data[offset + 1] & 0xFFL) << 8)
-        | ((data[offset + 2] & 0xFFL) << 16)
-        | ((data[offset + 3] & 0xFFL) << 24);
+  private static int getLE32(Object base, long off) {
+    int v = Platform.getInt(base, off);
+    return IS_BIG_ENDIAN ? Integer.reverseBytes(v) : v;
   }
 
-  private static void writeLE64(byte[] data, int offset, long value) {
-    for (int i = 0; i < 8; i++) {
-      data[offset + i] = (byte) (value >>> (8 * i));
-    }
+  private static int getU8(Object base, long off) {
+    return Platform.getByte(base, off) & 0xFF;
   }
 
-  // ---- mixing helpers ----
+  private static void putLE64(byte[] arr, long off, long val) {
+    Platform.putLong(arr, off, IS_BIG_ENDIAN ? Long.reverseBytes(val) : val);
+  }
 
-  private static long xxh64Avalanche(long h) {
+  // byte[] helper lets the JIT optimize array reads.
+  private static long getLE64BA(byte[] arr, long off) {
+    long v = Platform.getLong(arr, off);
+    return IS_BIG_ENDIAN ? Long.reverseBytes(v) : v;
+  }
+
+  private static final VarHandle LE_LONG =
+      MethodHandles.byteArrayViewVarHandle(long[].class, ByteOrder.LITTLE_ENDIAN);
+  private static final VarHandle LE_INT =
+      MethodHandles.byteArrayViewVarHandle(int[].class, ByteOrder.LITTLE_ENDIAN);
+
+  private static long getLE64VH(byte[] arr, int idx) {
+    return (long) LE_LONG.get(arr, idx);
+  }
+
+  private static int getLE32VH(byte[] arr, int idx) {
+    return (int) LE_INT.get(arr, idx);
+  }
+
+  private static void putLE64VH(byte[] arr, int idx, long val) {
+    LE_LONG.set(arr, idx, val);
+  }
+
+  /** Mirrors XXH64_avalanche (xxhash.h). */
+  private static long XXH64_avalanche(long h) {
     h ^= h >>> 33;
-    h *= PRIME64_2;
+    h *= XXH_PRIME64_2;
     h ^= h >>> 29;
-    h *= PRIME64_3;
+    h *= XXH_PRIME64_3;
     h ^= h >>> 32;
     return h;
   }
 
-  private static long xxh3Avalanche(long h) {
+  /** Mirrors XXH3_avalanche (xxhash.h). */
+  private static long XXH3_avalanche(long h) {
     h ^= h >>> 37;
     h *= PRIME_MX1;
     h ^= h >>> 32;
     return h;
   }
 
-  // Unsigned high 64 bits of the 128-bit product a*b (Math.multiplyHigh is signed).
-  private static long unsignedMultiplyHigh(long a, long b) {
-    return Math.multiplyHigh(a, b) + ((a >> 63) & b) + ((b >> 63) & a);
+  /** Mirrors XXH3_rrmxmx (xxhash.h). */
+  private static long XXH3_rrmxmx(long hash, long len) {
+    hash ^= Long.rotateLeft(hash, 49) ^ Long.rotateLeft(hash, 24);
+    hash *= PRIME_MX2;
+    hash ^= (hash >>> 35) + len;
+    hash *= PRIME_MX2;
+    hash ^= hash >>> 28;
+    return hash;
   }
 
-  // Low 64 bits XOR high 64 bits of the 128-bit product a*b.
-  private static long mul128Fold64(long a, long b) {
-    return (a * b) ^ unsignedMultiplyHigh(a, b);
+  /** Low 64 bits of 64x64 -> 128 multiply. */
+  private static long XXH_mult128_low64(long lhs, long rhs) {
+    return lhs * rhs;
   }
 
-  private static long mix16B(byte[] input, int inOff, int secOff, long seed) {
-    long lo = readLE64(input, inOff) ^ (readLE64(SECRET, secOff) + seed);
-    long hi = readLE64(input, inOff + 8) ^ (readLE64(SECRET, secOff + 8) - seed);
-    return mul128Fold64(lo, hi);
+  /** High 64 bits of UNSIGNED 64x64 multiply (Math.multiplyHigh is signed). */
+  private static long XXH_mult128_high64(long lhs, long rhs) {
+    long high = Math.multiplyHigh(lhs, rhs);
+    if (lhs < 0) high += rhs;
+    if (rhs < 0) high += lhs;
+    return high;
   }
 
-  // ---- XXH3 64-bit ----
+  /** Folded 128-bit multiply: {@code low64 ^ high64}. Mirrors XXH3_mul128_fold64. */
+  private static long XXH3_mul128_fold64(long lhs, long rhs) {
+    return XXH_mult128_low64(lhs, rhs) ^ XXH_mult128_high64(lhs, rhs);
+  }
 
-  public static long hash64(byte[] input, long seed) {
-    int len = input.length;
-    if (len <= 16) {
-      if (len > 8) {
-        return len9to16(input, len, seed);
-      } else if (len >= 4) {
-        return len4to8(input, len, seed);
-      } else if (len > 0) {
-        return len1to3(input, len, seed);
+  /** Mirrors XXH3_len_1to3_64b. */
+  private static long XXH3_len_1to3_64b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed) {
+    int c1 = getU8(in, off);
+    int c2 = getU8(in, off + (len >>> 1));
+    int c3 = getU8(in, off + len - 1);
+    int combined = (c1 << 16) | (c2 << 24) | c3 | (len << 8);
+    long bitflip = ((getLE32(secret, secOff) ^ getLE32(secret, secOff + 4)) & 0xFFFFFFFFL) + seed;
+    return XXH64_avalanche((combined & 0xFFFFFFFFL) ^ bitflip);
+  }
+
+  /** Mirrors XXH3_len_4to8_64b. */
+  private static long XXH3_len_4to8_64b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed) {
+    seed ^= ((long) Integer.reverseBytes((int) seed)) << 32;
+    long input1 = getLE32(in, off) & 0xFFFFFFFFL;
+    long input2 = getLE32(in, off + len - 4) & 0xFFFFFFFFL;
+    long bitflip = (getLE64(secret, secOff + 8) ^ getLE64(secret, secOff + 16)) - seed;
+    long input64 = input2 + (input1 << 32);
+    return XXH3_rrmxmx(input64 ^ bitflip, len);
+  }
+
+  /** Mirrors XXH3_len_9to16_64b. */
+  private static long XXH3_len_9to16_64b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed) {
+    long bitflip1 = (getLE64(secret, secOff + 24) ^ getLE64(secret, secOff + 32)) + seed;
+    long bitflip2 = (getLE64(secret, secOff + 40) ^ getLE64(secret, secOff + 48)) - seed;
+    long lo = getLE64(in, off)           ^ bitflip1;
+    long hi = getLE64(in, off + len - 8) ^ bitflip2;
+    long acc = len + Long.reverseBytes(lo) + hi + XXH3_mul128_fold64(lo, hi);
+    return XXH3_avalanche(acc);
+  }
+
+  /** Mirrors XXH3_len_0to16_64b (dispatch by length). */
+  private static long XXH3_len_0to16_64b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed) {
+    if (len > 8)  return XXH3_len_9to16_64b(in, off, len, secret, secOff, seed);
+    if (len >= 4) return XXH3_len_4to8_64b(in, off, len, secret, secOff, seed);
+    if (len > 0)  return XXH3_len_1to3_64b(in, off, len, secret, secOff, seed);
+    return XXH64_avalanche(seed ^ getLE64(secret, secOff + 56) ^ getLE64(secret, secOff + 64));
+  }
+
+  /** Mirrors XXH3_mix16B. */
+  private static long XXH3_mix16B(
+      Object in, long inOff, byte[] secret, long secOff, long seed) {
+    return XXH3_mul128_fold64(
+      getLE64(in, inOff)     ^ (getLE64(secret, secOff)     + seed),
+      getLE64(in, inOff + 8) ^ (getLE64(secret, secOff + 8) - seed));
+  }
+
+  /** Mirrors XXH3_len_17to128_64b. */
+  private static long XXH3_len_17to128_64b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed) {
+    long acc = len * XXH_PRIME64_1;
+    if (len > 32) {
+      if (len > 64) {
+        if (len > 96) {
+          acc += XXH3_mix16B(in, off + 48,       secret, secOff + 96,  seed);
+          acc += XXH3_mix16B(in, off + len - 64, secret, secOff + 112, seed);
+        }
+        acc += XXH3_mix16B(in, off + 32,       secret, secOff + 64, seed);
+        acc += XXH3_mix16B(in, off + len - 48, secret, secOff + 80, seed);
       }
-      return xxh64Avalanche(seed ^ readLE64(SECRET, 56) ^ readLE64(SECRET, 64));
-    } else if (len <= 128) {
-      return len17to128(input, len, seed);
-    } else if (len <= 240) {
-      return len129to240(input, len, seed);
+      acc += XXH3_mix16B(in, off + 16,       secret, secOff + 32, seed);
+      acc += XXH3_mix16B(in, off + len - 32, secret, secOff + 48, seed);
     }
-    return hashLong(input, len, seed);
+    acc += XXH3_mix16B(in, off,            secret, secOff,      seed);
+    acc += XXH3_mix16B(in, off + len - 16, secret, secOff + 16, seed);
+    return XXH3_avalanche(acc);
   }
 
-  private static long len1to3(byte[] input, int len, long seed) {
-    long combined = ((input[0] & 0xFFL) << 16)
-        | ((input[len >> 1] & 0xFFL) << 24)
-        | (input[len - 1] & 0xFFL)
-        | ((long) len << 8);
-    long flip = (readLE32(SECRET, 0) ^ readLE32(SECRET, 4)) + seed;
-    return xxh64Avalanche(combined ^ flip);
-  }
-
-  private static long len4to8(byte[] input, int len, long seed) {
-    seed ^= ((long) Integer.reverseBytes((int) seed) & 0xFFFFFFFFL) << 32;
-    long in1 = readLE32(input, 0);
-    long in2 = readLE32(input, len - 4);
-    long combined = in2 | (in1 << 32);
-    long flip = (readLE64(SECRET, 8) ^ readLE64(SECRET, 16)) - seed;
-    long x = combined ^ flip;
-    x ^= Long.rotateLeft(x, 49) ^ Long.rotateLeft(x, 24);
-    x *= PRIME_MX2;
-    x ^= (x >>> 35) + len;
-    x *= PRIME_MX2;
-    x ^= x >>> 28;
-    return x;
-  }
-
-  private static long len9to16(byte[] input, int len, long seed) {
-    long flip1 = (readLE64(SECRET, 24) ^ readLE64(SECRET, 32)) + seed;
-    long flip2 = (readLE64(SECRET, 40) ^ readLE64(SECRET, 48)) - seed;
-    long in1 = readLE64(input, 0) ^ flip1;
-    long in2 = readLE64(input, len - 8) ^ flip2;
-    long acc = len + Long.reverseBytes(in1) + in2 + mul128Fold64(in1, in2);
-    return xxh3Avalanche(acc);
-  }
-
-  private static long len17to128(byte[] input, int len, long seed) {
-    long acc = (long) len * PRIME64_1;
-    for (int i = (len - 1) >> 5; i >= 0; i--) {
-      acc += mix16B(input, 16 * i, 32 * i, seed);
-      acc += mix16B(input, len - 16 * (i + 1), 32 * i + 16, seed);
-    }
-    return xxh3Avalanche(acc);
-  }
-
-  private static long len129to240(byte[] input, int len, long seed) {
-    long acc = (long) len * PRIME64_1;
+  /** Mirrors XXH3_len_129to240_64b. */
+  private static long XXH3_len_129to240_64b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed) {
+    long acc = len * XXH_PRIME64_1;
     int nbRounds = len / 16;
     for (int i = 0; i < 8; i++) {
-      acc += mix16B(input, 16 * i, 16 * i, seed);
+      acc += XXH3_mix16B(in, off + 16 * i, secret, secOff + 16 * i, seed);
     }
-    acc = xxh3Avalanche(acc);
+    long accEnd = XXH3_mix16B(
+      in, off + len - 16,
+      secret, secOff + XXH3_SECRET_SIZE_MIN - XXH3_MIDSIZE_LASTOFFSET, seed);
+    acc = XXH3_avalanche(acc);
     for (int i = 8; i < nbRounds; i++) {
-      acc += mix16B(input, 16 * i, 16 * (i - 8) + 3, seed);
+      accEnd += XXH3_mix16B(
+        in, off + 16 * i,
+        secret, secOff + 16 * (i - 8) + XXH3_MIDSIZE_STARTOFFSET, seed);
     }
-    acc += mix16B(input, len - 16, SECRET_SIZE_MIN - 17, seed);
-    return xxh3Avalanche(acc);
+    return XXH3_avalanche(acc + accEnd);
   }
 
-  // ---- long input (> 240 bytes) ----
-
-  private static byte[] customSecret(long seed) {
-    if (seed == 0) {
-      return SECRET;
-    }
-    byte[] secret = new byte[SECRET_SIZE];
-    for (int i = 0; i < SECRET_SIZE / 16; i++) {
-      writeLE64(secret, 16 * i, readLE64(SECRET, 16 * i) + seed);
-      writeLE64(secret, 16 * i + 8, readLE64(SECRET, 16 * i + 8) - seed);
-    }
-    return secret;
+  private static long XXH128_mix32B_once(
+      long seed, byte[] secret, long secOff, long acc,
+      long i0, long i1, long i2, long i3) {
+    acc += XXH3_mul128_fold64(
+      i0 ^ (getLE64(secret, secOff)     + seed),
+      i1 ^ (getLE64(secret, secOff + 8) - seed));
+    return acc ^ (i2 + i3);
   }
 
-  private static void accumulate512(
-      long[] acc, byte[] input, int inOff, byte[] secret, int secOff) {
-    for (int i = 0; i < 8; i++) {
-      long data = readLE64(input, inOff + 8 * i);
-      long key = data ^ readLE64(secret, secOff + 8 * i);
-      acc[i ^ 1] += data;
-      acc[i] += (key & 0xFFFFFFFFL) * (key >>> 32);
+  /** Mirrors XXH3_len_0to16_128b. */
+    private static long XXH3_len_0to16_128b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed, byte[] output) {
+    if (len > 8) {
+      long bitflipl = (getLE64(secret, secOff + 32) ^ getLE64(secret, secOff + 40)) - seed;
+      long bitfliph = (getLE64(secret, secOff + 48) ^ getLE64(secret, secOff + 56)) + seed;
+      long lo = getLE64(in, off);
+      long hi = getLE64(in, off + len - 8);
+      long loHigh = XXH_mult128_low64(lo ^ hi ^ bitflipl, XXH_PRIME64_1);
+      long hiHigh = XXH_mult128_high64(lo ^ hi ^ bitflipl, XXH_PRIME64_1);
+      loHigh += ((long)(len - 1) << 54);
+      hi ^= bitfliph;
+      hiHigh += hi + (hi & 0xFFFFFFFFL) * (XXH_PRIME32_2 - 1);
+      loHigh ^= Long.reverseBytes(hiHigh);
+      long h128lo = XXH_mult128_low64(loHigh, XXH_PRIME64_2);
+      long h128hi = XXH_mult128_high64(loHigh, XXH_PRIME64_2) + hiHigh * XXH_PRIME64_2;
+      return write128AndFold(output, XXH3_avalanche(h128hi), XXH3_avalanche(h128lo));
     }
+    if (len >= 4) {
+      seed ^= ((long) Integer.reverseBytes((int) seed)) << 32;
+      int inLo = getLE32(in, off);
+      int inHi = getLE32(in, off + len - 4);
+      long in64 = (inLo & 0xFFFFFFFFL) + (((long)(inHi & 0xFFFFFFFFL)) << 32);
+      long bitflip = (getLE64(secret, secOff + 16) ^ getLE64(secret, secOff + 24)) + seed;
+      long keyed = in64 ^ bitflip;
+      long multiplier = XXH_PRIME64_1 + (len << 2);
+      long mLow  = XXH_mult128_low64(keyed, multiplier);
+      long mHigh = XXH_mult128_high64(keyed, multiplier);
+      mHigh += mLow << 1;
+      mLow  ^= mHigh >>> 3;
+      long low  = mLow ^ (mLow >>> 35);
+      low  *= PRIME_MX2;
+      low  ^= low >>> 28;
+      return write128AndFold(output, XXH3_avalanche(mHigh), low);
+    }
+    if (len > 0) {
+      int c1 = getU8(in, off);
+      int c2 = getU8(in, off + (len >> 1));
+      int c3 = getU8(in, off + len - 1);
+      int combinedl = (c1 << 16) | (c2 << 24) | c3 | (len << 8);
+      int combinedh = Integer.rotateLeft(Integer.reverseBytes(combinedl), 13);
+      long bitflipl =
+          ((long)(getLE32(secret, secOff) ^ getLE32(secret, secOff + 4)) & 0xFFFFFFFFL) + seed;
+      long bitfliph =
+          ((long)(getLE32(secret, secOff + 8) ^ getLE32(secret, secOff + 12)) & 0xFFFFFFFFL) - seed;
+      return write128AndFold(output,
+        XXH64_avalanche((combinedh & 0xFFFFFFFFL) ^ bitfliph),
+        XXH64_avalanche((combinedl & 0xFFFFFFFFL) ^ bitflipl));
+    }
+    long bitflipl = getLE64(secret, secOff + 64) ^ getLE64(secret, secOff + 72);
+    long bitfliph = getLE64(secret, secOff + 80) ^ getLE64(secret, secOff + 88);
+    return write128AndFold(output,
+      XXH64_avalanche(seed ^ bitfliph),
+      XXH64_avalanche(seed ^ bitflipl));
   }
 
-  private static void scrambleAcc(long[] acc, byte[] secret, int secOff) {
-    for (int i = 0; i < 8; i++) {
-      acc[i] ^= acc[i] >>> 47;
-      acc[i] ^= readLE64(secret, secOff + 8 * i);
-      acc[i] *= PRIME32_1;
-    }
-  }
-
-  private static long mergeAccs(long[] acc, byte[] secret, int secOff, long start) {
-    long result = start;
-    for (int i = 0; i < 4; i++) {
-      long a0 = acc[2 * i] ^ readLE64(secret, secOff + 16 * i);
-      long a1 = acc[2 * i + 1] ^ readLE64(secret, secOff + 16 * i + 8);
-      result += mul128Fold64(a0, a1);
-    }
-    return xxh3Avalanche(result);
-  }
-
-  private static long[] hashLongAccumulate(byte[] input, int len, byte[] secret) {
-    long[] acc = {PRIME32_3, PRIME64_1, PRIME64_2, PRIME64_3, PRIME64_4, PRIME32_2, PRIME64_5,
-        PRIME32_1};
-    int nbBlocks = (len - 1) / BLOCK_LEN;
-    for (int n = 0; n < nbBlocks; n++) {
-      for (int s = 0; s < NB_STRIPES_PER_BLOCK; s++) {
-        accumulate512(acc, input, n * BLOCK_LEN + s * STRIPE_LEN, secret, s * 8);
+  /** Mirrors XXH3_len_17to128_128b. */
+    private static long XXH3_len_17to128_128b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed, byte[] output) {
+    long acc0 = len * XXH_PRIME64_1;
+    long acc1 = 0;
+    if (len > 32) {
+      if (len > 64) {
+        if (len > 96) {
+          long i0 = getLE64(in, off + 48),       i1 = getLE64(in, off + 56);
+          long i2 = getLE64(in, off + len - 64), i3 = getLE64(in, off + len - 56);
+          acc0 = XXH128_mix32B_once(seed, secret, secOff + 96,      acc0, i0, i1, i2, i3);
+          acc1 = XXH128_mix32B_once(seed, secret, secOff + 96 + 16, acc1, i2, i3, i0, i1);
+        }
+        long i0 = getLE64(in, off + 32),       i1 = getLE64(in, off + 40);
+        long i2 = getLE64(in, off + len - 48), i3 = getLE64(in, off + len - 40);
+        acc0 = XXH128_mix32B_once(seed, secret, secOff + 64,      acc0, i0, i1, i2, i3);
+        acc1 = XXH128_mix32B_once(seed, secret, secOff + 64 + 16, acc1, i2, i3, i0, i1);
       }
-      scrambleAcc(acc, secret, SECRET_SIZE - STRIPE_LEN);
+      long i0 = getLE64(in, off + 16),       i1 = getLE64(in, off + 24);
+      long i2 = getLE64(in, off + len - 32), i3 = getLE64(in, off + len - 24);
+      acc0 = XXH128_mix32B_once(seed, secret, secOff + 32,      acc0, i0, i1, i2, i3);
+      acc1 = XXH128_mix32B_once(seed, secret, secOff + 32 + 16, acc1, i2, i3, i0, i1);
     }
-    int nbStripes = ((len - 1) - BLOCK_LEN * nbBlocks) / STRIPE_LEN;
+    long i0 = getLE64(in, off),            i1 = getLE64(in, off + 8);
+    long i2 = getLE64(in, off + len - 16), i3 = getLE64(in, off + len - 8);
+    acc0 = XXH128_mix32B_once(seed, secret, secOff,      acc0, i0, i1, i2, i3);
+    acc1 = XXH128_mix32B_once(seed, secret, secOff + 16, acc1, i2, i3, i0, i1);
+    long low  = XXH3_avalanche(acc0 + acc1);
+    long high = 0L - XXH3_avalanche(acc0 * XXH_PRIME64_1 + acc1 * XXH_PRIME64_4
+                                   + (len - seed) * XXH_PRIME64_2);
+    return write128AndFold(output, high, low);
+  }
+
+  /** Mirrors XXH3_len_129to240_128b. */
+    private static long XXH3_len_129to240_128b(
+      Object in, long off, int len, byte[] secret, long secOff, long seed, byte[] output) {
+    int nbRounds = len / 32;
+    long acc0 = len * XXH_PRIME64_1;
+    long acc1 = 0;
+    int i = 0;
+    for (; i < 4; ++i) {
+      long i0 = getLE64(in, off + 32L * i),       i1 = getLE64(in, off + 32L * i + 8);
+      long i2 = getLE64(in, off + 32L * i + 16),  i3 = getLE64(in, off + 32L * i + 24);
+      acc0 = XXH128_mix32B_once(seed, secret, secOff + 32L * i,      acc0, i0, i1, i2, i3);
+      acc1 = XXH128_mix32B_once(seed, secret, secOff + 32L * i + 16, acc1, i2, i3, i0, i1);
+    }
+    acc0 = XXH3_avalanche(acc0);
+    acc1 = XXH3_avalanche(acc1);
+    for (; i < nbRounds; ++i) {
+      long i0 = getLE64(in, off + 32L * i),       i1 = getLE64(in, off + 32L * i + 8);
+      long i2 = getLE64(in, off + 32L * i + 16),  i3 = getLE64(in, off + 32L * i + 24);
+      acc0 = XXH128_mix32B_once(seed, secret,
+        secOff + XXH3_MIDSIZE_STARTOFFSET + 32L * (i - 4),      acc0, i0, i1, i2, i3);
+      acc1 = XXH128_mix32B_once(seed, secret,
+        secOff + XXH3_MIDSIZE_STARTOFFSET + 32L * (i - 4) + 16, acc1, i2, i3, i0, i1);
+    }
+    long i0 = getLE64(in, off + len - 16), i1 = getLE64(in, off + len - 8);
+    long i2 = getLE64(in, off + len - 32), i3 = getLE64(in, off + len - 24);
+    acc0 = XXH128_mix32B_once(-seed, secret,
+      secOff + XXH3_SECRET_SIZE_MIN - XXH3_MIDSIZE_LASTOFFSET - 16, acc0, i0, i1, i2, i3);
+    acc1 = XXH128_mix32B_once(-seed, secret,
+      secOff + XXH3_SECRET_SIZE_MIN - XXH3_MIDSIZE_LASTOFFSET,      acc1, i2, i3, i0, i1);
+    long low  = XXH3_avalanche(acc0 + acc1);
+    long high = 0L - XXH3_avalanche(acc0 * XXH_PRIME64_1 + acc1 * XXH_PRIME64_4
+                                   + (len - seed) * XXH_PRIME64_2);
+    return write128AndFold(output, high, low);
+  }
+
+  // Inline the following functions for performance
+  //   XXH3_hashLong_internal_loop
+  //   + XXH3_accumulate_512_scalar
+  //   + XXH3_scrambleAcc_scalar
+  //   + XXH3_mergeAccs
+  private static long XXH3_hashLong_64b(
+      Object in, long off, int len, byte[] secret, long secOff) {
+    long a0 = XXH_PRIME32_3, a1 = XXH_PRIME64_1, a2 = XXH_PRIME64_2, a3 = XXH_PRIME64_3;
+    long a4 = XXH_PRIME64_4, a5 = XXH_PRIME32_2, a6 = XXH_PRIME64_5, a7 = XXH_PRIME32_1;
+
+    int nbBlocks = (len - 1) / BLOCK_LEN;
+    long scramOff = secOff + SCRAM_OFFSET;
+
+    for (int n = 0; n < nbBlocks; n++) {
+      long blockBase = off + (long) n * BLOCK_LEN;
+      for (int s = 0; s < NB_STRIPES_PER_BLOCK; s++) {
+        long b  = blockBase + (long) s * XXH_STRIPE_LEN;
+        long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+        // Per-lane stripe accumulation.
+        long d0 = getLE64(in, b),      k0 = d0 ^ getLE64(secret, sk);
+        long d1 = getLE64(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+        long d2 = getLE64(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+        long d3 = getLE64(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+        long d4 = getLE64(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+        long d5 = getLE64(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+        long d6 = getLE64(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+        long d7 = getLE64(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+        a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+        a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+        a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+        a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+        a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+        a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+        a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+        a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+      }
+      // Per-lane accumulator scramble.
+      a0 ^= a0 >>> 47; a0 ^= getLE64(secret, scramOff);      a0 *= XXH_PRIME32_1;
+      a1 ^= a1 >>> 47; a1 ^= getLE64(secret, scramOff + 8);  a1 *= XXH_PRIME32_1;
+      a2 ^= a2 >>> 47; a2 ^= getLE64(secret, scramOff + 16); a2 *= XXH_PRIME32_1;
+      a3 ^= a3 >>> 47; a3 ^= getLE64(secret, scramOff + 24); a3 *= XXH_PRIME32_1;
+      a4 ^= a4 >>> 47; a4 ^= getLE64(secret, scramOff + 32); a4 *= XXH_PRIME32_1;
+      a5 ^= a5 >>> 47; a5 ^= getLE64(secret, scramOff + 40); a5 *= XXH_PRIME32_1;
+      a6 ^= a6 >>> 47; a6 ^= getLE64(secret, scramOff + 48); a6 *= XXH_PRIME32_1;
+      a7 ^= a7 >>> 47; a7 ^= getLE64(secret, scramOff + 56); a7 *= XXH_PRIME32_1;
+    }
+
+    // Partial stripes after the last full block (no scramble after partial).
+    int nbStripes = ((len - 1) - BLOCK_LEN * nbBlocks) / XXH_STRIPE_LEN;
+    long partBase = off + (long) nbBlocks * BLOCK_LEN;
     for (int s = 0; s < nbStripes; s++) {
-      accumulate512(acc, input, nbBlocks * BLOCK_LEN + s * STRIPE_LEN, secret, s * 8);
+      long b  = partBase + (long) s * XXH_STRIPE_LEN;
+      long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+      long d0 = getLE64(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
     }
-    accumulate512(
-        acc, input, len - STRIPE_LEN, secret, SECRET_SIZE - STRIPE_LEN - SECRET_LASTACC_START);
-    return acc;
+
+    // Last stripe.
+    if (len > XXH_STRIPE_LEN) {
+      long b  = off + len - XXH_STRIPE_LEN;
+      long sk = secOff + LAST_ACC_OFFSET;
+      long d0 = getLE64(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    // Merge accumulators.
+    long ms = secOff + XXH_SECRET_MERGEACCS_START;
+    return XXH3_avalanche(len * XXH_PRIME64_1
+      + XXH3_mul128_fold64(a0 ^ getLE64(secret, ms),      a1 ^ getLE64(secret, ms + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64(secret, ms + 16), a3 ^ getLE64(secret, ms + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64(secret, ms + 32), a5 ^ getLE64(secret, ms + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64(secret, ms + 48), a7 ^ getLE64(secret, ms + 56)));
   }
 
-  private static long hashLong(byte[] input, int len, long seed) {
-    byte[] secret = customSecret(seed);
-    long[] acc = hashLongAccumulate(input, len, secret);
-    return mergeAccs(acc, secret, SECRET_MERGEACCS_START, (long) len * PRIME64_1);
+  /** 128-bit twin of XXH3_hashLong_64b. */
+    private static long XXH3_hashLong_128b(
+      Object in, long off, int len, byte[] secret, long secOff, byte[] output) {
+    long a0 = XXH_PRIME32_3, a1 = XXH_PRIME64_1, a2 = XXH_PRIME64_2, a3 = XXH_PRIME64_3;
+    long a4 = XXH_PRIME64_4, a5 = XXH_PRIME32_2, a6 = XXH_PRIME64_5, a7 = XXH_PRIME32_1;
+
+    int nbBlocks = (len - 1) / BLOCK_LEN;
+    long scramOff = secOff + SCRAM_OFFSET;
+
+    for (int n = 0; n < nbBlocks; n++) {
+      long blockBase = off + (long) n * BLOCK_LEN;
+      for (int s = 0; s < NB_STRIPES_PER_BLOCK; s++) {
+        long b  = blockBase + (long) s * XXH_STRIPE_LEN;
+        long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+        long d0 = getLE64(in, b),      k0 = d0 ^ getLE64(secret, sk);
+        long d1 = getLE64(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+        long d2 = getLE64(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+        long d3 = getLE64(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+        long d4 = getLE64(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+        long d5 = getLE64(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+        long d6 = getLE64(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+        long d7 = getLE64(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+        a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+        a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+        a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+        a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+        a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+        a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+        a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+        a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+      }
+      a0 ^= a0 >>> 47; a0 ^= getLE64(secret, scramOff);      a0 *= XXH_PRIME32_1;
+      a1 ^= a1 >>> 47; a1 ^= getLE64(secret, scramOff + 8);  a1 *= XXH_PRIME32_1;
+      a2 ^= a2 >>> 47; a2 ^= getLE64(secret, scramOff + 16); a2 *= XXH_PRIME32_1;
+      a3 ^= a3 >>> 47; a3 ^= getLE64(secret, scramOff + 24); a3 *= XXH_PRIME32_1;
+      a4 ^= a4 >>> 47; a4 ^= getLE64(secret, scramOff + 32); a4 *= XXH_PRIME32_1;
+      a5 ^= a5 >>> 47; a5 ^= getLE64(secret, scramOff + 40); a5 *= XXH_PRIME32_1;
+      a6 ^= a6 >>> 47; a6 ^= getLE64(secret, scramOff + 48); a6 *= XXH_PRIME32_1;
+      a7 ^= a7 >>> 47; a7 ^= getLE64(secret, scramOff + 56); a7 *= XXH_PRIME32_1;
+    }
+
+    int nbStripes = ((len - 1) - BLOCK_LEN * nbBlocks) / XXH_STRIPE_LEN;
+    long partBase = off + (long) nbBlocks * BLOCK_LEN;
+    for (int s = 0; s < nbStripes; s++) {
+      long b  = partBase + (long) s * XXH_STRIPE_LEN;
+      long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+      long d0 = getLE64(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    if (len > XXH_STRIPE_LEN) {
+      long b  = off + len - XXH_STRIPE_LEN;
+      long sk = secOff + LAST_ACC_OFFSET;
+      long d0 = getLE64(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    long ms1 = secOff + XXH_SECRET_MERGEACCS_START;
+    long low = XXH3_avalanche(len * XXH_PRIME64_1
+      + XXH3_mul128_fold64(a0 ^ getLE64(secret, ms1),      a1 ^ getLE64(secret, ms1 + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64(secret, ms1 + 16), a3 ^ getLE64(secret, ms1 + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64(secret, ms1 + 32), a5 ^ getLE64(secret, ms1 + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64(secret, ms1 + 48), a7 ^ getLE64(secret, ms1 + 56)));
+    long ms2 = secOff + XXH3_SECRET_DEFAULT_SIZE - XXH_STRIPE_LEN - XXH_SECRET_MERGEACCS_START;
+    long high = XXH3_avalanche(~(len * XXH_PRIME64_2)
+      + XXH3_mul128_fold64(a0 ^ getLE64(secret, ms2),      a1 ^ getLE64(secret, ms2 + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64(secret, ms2 + 16), a3 ^ getLE64(secret, ms2 + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64(secret, ms2 + 32), a5 ^ getLE64(secret, ms2 + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64(secret, ms2 + 48), a7 ^ getLE64(secret, ms2 + 56)));
+    return write128AndFold(output, high, low);
   }
 
-  /** Hashes the input with the default seed 0. */
+  private static long XXH3_hashLong_64b_ba(
+      byte[] in, long off, int len, byte[] secret, long secOff) {
+    long a0 = XXH_PRIME32_3, a1 = XXH_PRIME64_1, a2 = XXH_PRIME64_2, a3 = XXH_PRIME64_3;
+    long a4 = XXH_PRIME64_4, a5 = XXH_PRIME32_2, a6 = XXH_PRIME64_5, a7 = XXH_PRIME32_1;
+
+    int nbBlocks = (len - 1) / BLOCK_LEN;
+    long scramOff = secOff + SCRAM_OFFSET;
+
+    for (int n = 0; n < nbBlocks; n++) {
+      long blockBase = off + (long) n * BLOCK_LEN;
+      for (int s = 0; s < NB_STRIPES_PER_BLOCK; s++) {
+        long b  = blockBase + (long) s * XXH_STRIPE_LEN;
+        long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+        long d0 = getLE64BA(in, b),      k0 = d0 ^ getLE64(secret, sk);
+        long d1 = getLE64BA(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+        long d2 = getLE64BA(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+        long d3 = getLE64BA(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+        long d4 = getLE64BA(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+        long d5 = getLE64BA(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+        long d6 = getLE64BA(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+        long d7 = getLE64BA(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+        a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+        a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+        a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+        a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+        a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+        a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+        a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+        a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+      }
+      a0 ^= a0 >>> 47; a0 ^= getLE64(secret, scramOff);      a0 *= XXH_PRIME32_1;
+      a1 ^= a1 >>> 47; a1 ^= getLE64(secret, scramOff + 8);  a1 *= XXH_PRIME32_1;
+      a2 ^= a2 >>> 47; a2 ^= getLE64(secret, scramOff + 16); a2 *= XXH_PRIME32_1;
+      a3 ^= a3 >>> 47; a3 ^= getLE64(secret, scramOff + 24); a3 *= XXH_PRIME32_1;
+      a4 ^= a4 >>> 47; a4 ^= getLE64(secret, scramOff + 32); a4 *= XXH_PRIME32_1;
+      a5 ^= a5 >>> 47; a5 ^= getLE64(secret, scramOff + 40); a5 *= XXH_PRIME32_1;
+      a6 ^= a6 >>> 47; a6 ^= getLE64(secret, scramOff + 48); a6 *= XXH_PRIME32_1;
+      a7 ^= a7 >>> 47; a7 ^= getLE64(secret, scramOff + 56); a7 *= XXH_PRIME32_1;
+    }
+
+    int nbStripes = ((len - 1) - BLOCK_LEN * nbBlocks) / XXH_STRIPE_LEN;
+    long partBase = off + (long) nbBlocks * BLOCK_LEN;
+    for (int s = 0; s < nbStripes; s++) {
+      long b  = partBase + (long) s * XXH_STRIPE_LEN;
+      long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+      long d0 = getLE64BA(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64BA(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64BA(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64BA(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64BA(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64BA(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64BA(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64BA(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    if (len > XXH_STRIPE_LEN) {
+      long b  = off + len - XXH_STRIPE_LEN;
+      long sk = secOff + LAST_ACC_OFFSET;
+      long d0 = getLE64BA(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64BA(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64BA(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64BA(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64BA(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64BA(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64BA(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64BA(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    long ms = secOff + XXH_SECRET_MERGEACCS_START;
+    return XXH3_avalanche(len * XXH_PRIME64_1
+      + XXH3_mul128_fold64(a0 ^ getLE64(secret, ms),      a1 ^ getLE64(secret, ms + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64(secret, ms + 16), a3 ^ getLE64(secret, ms + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64(secret, ms + 32), a5 ^ getLE64(secret, ms + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64(secret, ms + 48), a7 ^ getLE64(secret, ms + 56)));
+  }
+
+  /** byte[]-typed twin of XXH3_hashLong_128b. */
+    private static long XXH3_hashLong_128b_ba(
+      byte[] in, long off, int len, byte[] secret, long secOff, byte[] output) {
+    long a0 = XXH_PRIME32_3, a1 = XXH_PRIME64_1, a2 = XXH_PRIME64_2, a3 = XXH_PRIME64_3;
+    long a4 = XXH_PRIME64_4, a5 = XXH_PRIME32_2, a6 = XXH_PRIME64_5, a7 = XXH_PRIME32_1;
+
+    int nbBlocks = (len - 1) / BLOCK_LEN;
+    long scramOff = secOff + SCRAM_OFFSET;
+
+    for (int n = 0; n < nbBlocks; n++) {
+      long blockBase = off + (long) n * BLOCK_LEN;
+      for (int s = 0; s < NB_STRIPES_PER_BLOCK; s++) {
+        long b  = blockBase + (long) s * XXH_STRIPE_LEN;
+        long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+        long d0 = getLE64BA(in, b),      k0 = d0 ^ getLE64(secret, sk);
+        long d1 = getLE64BA(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+        long d2 = getLE64BA(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+        long d3 = getLE64BA(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+        long d4 = getLE64BA(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+        long d5 = getLE64BA(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+        long d6 = getLE64BA(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+        long d7 = getLE64BA(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+        a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+        a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+        a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+        a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+        a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+        a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+        a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+        a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+      }
+      a0 ^= a0 >>> 47; a0 ^= getLE64(secret, scramOff);      a0 *= XXH_PRIME32_1;
+      a1 ^= a1 >>> 47; a1 ^= getLE64(secret, scramOff + 8);  a1 *= XXH_PRIME32_1;
+      a2 ^= a2 >>> 47; a2 ^= getLE64(secret, scramOff + 16); a2 *= XXH_PRIME32_1;
+      a3 ^= a3 >>> 47; a3 ^= getLE64(secret, scramOff + 24); a3 *= XXH_PRIME32_1;
+      a4 ^= a4 >>> 47; a4 ^= getLE64(secret, scramOff + 32); a4 *= XXH_PRIME32_1;
+      a5 ^= a5 >>> 47; a5 ^= getLE64(secret, scramOff + 40); a5 *= XXH_PRIME32_1;
+      a6 ^= a6 >>> 47; a6 ^= getLE64(secret, scramOff + 48); a6 *= XXH_PRIME32_1;
+      a7 ^= a7 >>> 47; a7 ^= getLE64(secret, scramOff + 56); a7 *= XXH_PRIME32_1;
+    }
+
+    int nbStripes = ((len - 1) - BLOCK_LEN * nbBlocks) / XXH_STRIPE_LEN;
+    long partBase = off + (long) nbBlocks * BLOCK_LEN;
+    for (int s = 0; s < nbStripes; s++) {
+      long b  = partBase + (long) s * XXH_STRIPE_LEN;
+      long sk = secOff   + (long) s * XXH_SECRET_CONSUME_RATE;
+      long d0 = getLE64BA(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64BA(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64BA(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64BA(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64BA(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64BA(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64BA(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64BA(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    if (len > XXH_STRIPE_LEN) {
+      long b  = off + len - XXH_STRIPE_LEN;
+      long sk = secOff + LAST_ACC_OFFSET;
+      long d0 = getLE64BA(in, b),      k0 = d0 ^ getLE64(secret, sk);
+      long d1 = getLE64BA(in, b + 8),  k1 = d1 ^ getLE64(secret, sk + 8);
+      long d2 = getLE64BA(in, b + 16), k2 = d2 ^ getLE64(secret, sk + 16);
+      long d3 = getLE64BA(in, b + 24), k3 = d3 ^ getLE64(secret, sk + 24);
+      long d4 = getLE64BA(in, b + 32), k4 = d4 ^ getLE64(secret, sk + 32);
+      long d5 = getLE64BA(in, b + 40), k5 = d5 ^ getLE64(secret, sk + 40);
+      long d6 = getLE64BA(in, b + 48), k6 = d6 ^ getLE64(secret, sk + 48);
+      long d7 = getLE64BA(in, b + 56), k7 = d7 ^ getLE64(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    long ms1 = secOff + XXH_SECRET_MERGEACCS_START;
+    long low = XXH3_avalanche(len * XXH_PRIME64_1
+      + XXH3_mul128_fold64(a0 ^ getLE64(secret, ms1),      a1 ^ getLE64(secret, ms1 + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64(secret, ms1 + 16), a3 ^ getLE64(secret, ms1 + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64(secret, ms1 + 32), a5 ^ getLE64(secret, ms1 + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64(secret, ms1 + 48), a7 ^ getLE64(secret, ms1 + 56)));
+    long ms2 = secOff + XXH3_SECRET_DEFAULT_SIZE - XXH_STRIPE_LEN - XXH_SECRET_MERGEACCS_START;
+    long high = XXH3_avalanche(~(len * XXH_PRIME64_2)
+      + XXH3_mul128_fold64(a0 ^ getLE64(secret, ms2),      a1 ^ getLE64(secret, ms2 + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64(secret, ms2 + 16), a3 ^ getLE64(secret, ms2 + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64(secret, ms2 + 32), a5 ^ getLE64(secret, ms2 + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64(secret, ms2 + 48), a7 ^ getLE64(secret, ms2 + 56)));
+    return write128AndFold(output, high, low);
+  }
+
+  private static long XXH3_hashLong_64b_vh(
+      byte[] in, int off, int len, byte[] secret, int secOff) {
+    long a0 = XXH_PRIME32_3, a1 = XXH_PRIME64_1, a2 = XXH_PRIME64_2, a3 = XXH_PRIME64_3;
+    long a4 = XXH_PRIME64_4, a5 = XXH_PRIME32_2, a6 = XXH_PRIME64_5, a7 = XXH_PRIME32_1;
+
+    int nbBlocks = (len - 1) / BLOCK_LEN;
+    int scramOff = secOff + (int) SCRAM_OFFSET;
+
+    for (int n = 0; n < nbBlocks; n++) {
+      int blockBase = off + n * BLOCK_LEN;
+      for (int s = 0; s < NB_STRIPES_PER_BLOCK; s++) {
+        int b  = blockBase + s * XXH_STRIPE_LEN;
+        int sk = secOff    + s * XXH_SECRET_CONSUME_RATE;
+        long d0 = getLE64VH(in, b),      k0 = d0 ^ getLE64VH(secret, sk);
+        long d1 = getLE64VH(in, b + 8),  k1 = d1 ^ getLE64VH(secret, sk + 8);
+        long d2 = getLE64VH(in, b + 16), k2 = d2 ^ getLE64VH(secret, sk + 16);
+        long d3 = getLE64VH(in, b + 24), k3 = d3 ^ getLE64VH(secret, sk + 24);
+        long d4 = getLE64VH(in, b + 32), k4 = d4 ^ getLE64VH(secret, sk + 32);
+        long d5 = getLE64VH(in, b + 40), k5 = d5 ^ getLE64VH(secret, sk + 40);
+        long d6 = getLE64VH(in, b + 48), k6 = d6 ^ getLE64VH(secret, sk + 48);
+        long d7 = getLE64VH(in, b + 56), k7 = d7 ^ getLE64VH(secret, sk + 56);
+        a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+        a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+        a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+        a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+        a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+        a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+        a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+        a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+      }
+      a0 ^= a0 >>> 47; a0 ^= getLE64VH(secret, scramOff);      a0 *= XXH_PRIME32_1;
+      a1 ^= a1 >>> 47; a1 ^= getLE64VH(secret, scramOff + 8);  a1 *= XXH_PRIME32_1;
+      a2 ^= a2 >>> 47; a2 ^= getLE64VH(secret, scramOff + 16); a2 *= XXH_PRIME32_1;
+      a3 ^= a3 >>> 47; a3 ^= getLE64VH(secret, scramOff + 24); a3 *= XXH_PRIME32_1;
+      a4 ^= a4 >>> 47; a4 ^= getLE64VH(secret, scramOff + 32); a4 *= XXH_PRIME32_1;
+      a5 ^= a5 >>> 47; a5 ^= getLE64VH(secret, scramOff + 40); a5 *= XXH_PRIME32_1;
+      a6 ^= a6 >>> 47; a6 ^= getLE64VH(secret, scramOff + 48); a6 *= XXH_PRIME32_1;
+      a7 ^= a7 >>> 47; a7 ^= getLE64VH(secret, scramOff + 56); a7 *= XXH_PRIME32_1;
+    }
+
+    int nbStripes = ((len - 1) - BLOCK_LEN * nbBlocks) / XXH_STRIPE_LEN;
+    int partBase  = off + nbBlocks * BLOCK_LEN;
+    for (int s = 0; s < nbStripes; s++) {
+      int b  = partBase + s * XXH_STRIPE_LEN;
+      int sk = secOff   + s * XXH_SECRET_CONSUME_RATE;
+      long d0 = getLE64VH(in, b),      k0 = d0 ^ getLE64VH(secret, sk);
+      long d1 = getLE64VH(in, b + 8),  k1 = d1 ^ getLE64VH(secret, sk + 8);
+      long d2 = getLE64VH(in, b + 16), k2 = d2 ^ getLE64VH(secret, sk + 16);
+      long d3 = getLE64VH(in, b + 24), k3 = d3 ^ getLE64VH(secret, sk + 24);
+      long d4 = getLE64VH(in, b + 32), k4 = d4 ^ getLE64VH(secret, sk + 32);
+      long d5 = getLE64VH(in, b + 40), k5 = d5 ^ getLE64VH(secret, sk + 40);
+      long d6 = getLE64VH(in, b + 48), k6 = d6 ^ getLE64VH(secret, sk + 48);
+      long d7 = getLE64VH(in, b + 56), k7 = d7 ^ getLE64VH(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    if (len > XXH_STRIPE_LEN) {
+      int b  = off + len - XXH_STRIPE_LEN;
+      int sk = secOff + (int) LAST_ACC_OFFSET;
+      long d0 = getLE64VH(in, b),      k0 = d0 ^ getLE64VH(secret, sk);
+      long d1 = getLE64VH(in, b + 8),  k1 = d1 ^ getLE64VH(secret, sk + 8);
+      long d2 = getLE64VH(in, b + 16), k2 = d2 ^ getLE64VH(secret, sk + 16);
+      long d3 = getLE64VH(in, b + 24), k3 = d3 ^ getLE64VH(secret, sk + 24);
+      long d4 = getLE64VH(in, b + 32), k4 = d4 ^ getLE64VH(secret, sk + 32);
+      long d5 = getLE64VH(in, b + 40), k5 = d5 ^ getLE64VH(secret, sk + 40);
+      long d6 = getLE64VH(in, b + 48), k6 = d6 ^ getLE64VH(secret, sk + 48);
+      long d7 = getLE64VH(in, b + 56), k7 = d7 ^ getLE64VH(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    int ms = secOff + XXH_SECRET_MERGEACCS_START;
+    return XXH3_avalanche(len * XXH_PRIME64_1
+      + XXH3_mul128_fold64(a0 ^ getLE64VH(secret, ms),      a1 ^ getLE64VH(secret, ms + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64VH(secret, ms + 16), a3 ^ getLE64VH(secret, ms + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64VH(secret, ms + 32), a5 ^ getLE64VH(secret, ms + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64VH(secret, ms + 48), a7 ^ getLE64VH(secret, ms + 56)));
+  }
+
+    private static long XXH3_hashLong_128b_vh(
+      byte[] in, int off, int len, byte[] secret, int secOff, byte[] output) {
+    long a0 = XXH_PRIME32_3, a1 = XXH_PRIME64_1, a2 = XXH_PRIME64_2, a3 = XXH_PRIME64_3;
+    long a4 = XXH_PRIME64_4, a5 = XXH_PRIME32_2, a6 = XXH_PRIME64_5, a7 = XXH_PRIME32_1;
+
+    int nbBlocks = (len - 1) / BLOCK_LEN;
+    int scramOff = secOff + (int) SCRAM_OFFSET;
+
+    for (int n = 0; n < nbBlocks; n++) {
+      int blockBase = off + n * BLOCK_LEN;
+      for (int s = 0; s < NB_STRIPES_PER_BLOCK; s++) {
+        int b  = blockBase + s * XXH_STRIPE_LEN;
+        int sk = secOff    + s * XXH_SECRET_CONSUME_RATE;
+        long d0 = getLE64VH(in, b),      k0 = d0 ^ getLE64VH(secret, sk);
+        long d1 = getLE64VH(in, b + 8),  k1 = d1 ^ getLE64VH(secret, sk + 8);
+        long d2 = getLE64VH(in, b + 16), k2 = d2 ^ getLE64VH(secret, sk + 16);
+        long d3 = getLE64VH(in, b + 24), k3 = d3 ^ getLE64VH(secret, sk + 24);
+        long d4 = getLE64VH(in, b + 32), k4 = d4 ^ getLE64VH(secret, sk + 32);
+        long d5 = getLE64VH(in, b + 40), k5 = d5 ^ getLE64VH(secret, sk + 40);
+        long d6 = getLE64VH(in, b + 48), k6 = d6 ^ getLE64VH(secret, sk + 48);
+        long d7 = getLE64VH(in, b + 56), k7 = d7 ^ getLE64VH(secret, sk + 56);
+        a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+        a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+        a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+        a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+        a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+        a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+        a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+        a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+      }
+      a0 ^= a0 >>> 47; a0 ^= getLE64VH(secret, scramOff);      a0 *= XXH_PRIME32_1;
+      a1 ^= a1 >>> 47; a1 ^= getLE64VH(secret, scramOff + 8);  a1 *= XXH_PRIME32_1;
+      a2 ^= a2 >>> 47; a2 ^= getLE64VH(secret, scramOff + 16); a2 *= XXH_PRIME32_1;
+      a3 ^= a3 >>> 47; a3 ^= getLE64VH(secret, scramOff + 24); a3 *= XXH_PRIME32_1;
+      a4 ^= a4 >>> 47; a4 ^= getLE64VH(secret, scramOff + 32); a4 *= XXH_PRIME32_1;
+      a5 ^= a5 >>> 47; a5 ^= getLE64VH(secret, scramOff + 40); a5 *= XXH_PRIME32_1;
+      a6 ^= a6 >>> 47; a6 ^= getLE64VH(secret, scramOff + 48); a6 *= XXH_PRIME32_1;
+      a7 ^= a7 >>> 47; a7 ^= getLE64VH(secret, scramOff + 56); a7 *= XXH_PRIME32_1;
+    }
+
+    int nbStripes = ((len - 1) - BLOCK_LEN * nbBlocks) / XXH_STRIPE_LEN;
+    int partBase  = off + nbBlocks * BLOCK_LEN;
+    for (int s = 0; s < nbStripes; s++) {
+      int b  = partBase + s * XXH_STRIPE_LEN;
+      int sk = secOff   + s * XXH_SECRET_CONSUME_RATE;
+      long d0 = getLE64VH(in, b),      k0 = d0 ^ getLE64VH(secret, sk);
+      long d1 = getLE64VH(in, b + 8),  k1 = d1 ^ getLE64VH(secret, sk + 8);
+      long d2 = getLE64VH(in, b + 16), k2 = d2 ^ getLE64VH(secret, sk + 16);
+      long d3 = getLE64VH(in, b + 24), k3 = d3 ^ getLE64VH(secret, sk + 24);
+      long d4 = getLE64VH(in, b + 32), k4 = d4 ^ getLE64VH(secret, sk + 32);
+      long d5 = getLE64VH(in, b + 40), k5 = d5 ^ getLE64VH(secret, sk + 40);
+      long d6 = getLE64VH(in, b + 48), k6 = d6 ^ getLE64VH(secret, sk + 48);
+      long d7 = getLE64VH(in, b + 56), k7 = d7 ^ getLE64VH(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    if (len > XXH_STRIPE_LEN) {
+      int b  = off + len - XXH_STRIPE_LEN;
+      int sk = secOff + (int) LAST_ACC_OFFSET;
+      long d0 = getLE64VH(in, b),      k0 = d0 ^ getLE64VH(secret, sk);
+      long d1 = getLE64VH(in, b + 8),  k1 = d1 ^ getLE64VH(secret, sk + 8);
+      long d2 = getLE64VH(in, b + 16), k2 = d2 ^ getLE64VH(secret, sk + 16);
+      long d3 = getLE64VH(in, b + 24), k3 = d3 ^ getLE64VH(secret, sk + 24);
+      long d4 = getLE64VH(in, b + 32), k4 = d4 ^ getLE64VH(secret, sk + 32);
+      long d5 = getLE64VH(in, b + 40), k5 = d5 ^ getLE64VH(secret, sk + 40);
+      long d6 = getLE64VH(in, b + 48), k6 = d6 ^ getLE64VH(secret, sk + 48);
+      long d7 = getLE64VH(in, b + 56), k7 = d7 ^ getLE64VH(secret, sk + 56);
+      a1 += d0;  a0 += (k0 & 0xFFFFFFFFL) * (k0 >>> 32);
+      a0 += d1;  a1 += (k1 & 0xFFFFFFFFL) * (k1 >>> 32);
+      a3 += d2;  a2 += (k2 & 0xFFFFFFFFL) * (k2 >>> 32);
+      a2 += d3;  a3 += (k3 & 0xFFFFFFFFL) * (k3 >>> 32);
+      a5 += d4;  a4 += (k4 & 0xFFFFFFFFL) * (k4 >>> 32);
+      a4 += d5;  a5 += (k5 & 0xFFFFFFFFL) * (k5 >>> 32);
+      a7 += d6;  a6 += (k6 & 0xFFFFFFFFL) * (k6 >>> 32);
+      a6 += d7;  a7 += (k7 & 0xFFFFFFFFL) * (k7 >>> 32);
+    }
+
+    int ms1 = secOff + XXH_SECRET_MERGEACCS_START;
+    long low = XXH3_avalanche(len * XXH_PRIME64_1
+      + XXH3_mul128_fold64(a0 ^ getLE64VH(secret, ms1),      a1 ^ getLE64VH(secret, ms1 + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64VH(secret, ms1 + 16), a3 ^ getLE64VH(secret, ms1 + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64VH(secret, ms1 + 32), a5 ^ getLE64VH(secret, ms1 + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64VH(secret, ms1 + 48), a7 ^ getLE64VH(secret, ms1 + 56)));
+    int ms2 = secOff + XXH3_SECRET_DEFAULT_SIZE - XXH_STRIPE_LEN - XXH_SECRET_MERGEACCS_START;
+    long high = XXH3_avalanche(~(len * XXH_PRIME64_2)
+      + XXH3_mul128_fold64(a0 ^ getLE64VH(secret, ms2),      a1 ^ getLE64VH(secret, ms2 + 8))
+      + XXH3_mul128_fold64(a2 ^ getLE64VH(secret, ms2 + 16), a3 ^ getLE64VH(secret, ms2 + 24))
+      + XXH3_mul128_fold64(a4 ^ getLE64VH(secret, ms2 + 32), a5 ^ getLE64VH(secret, ms2 + 40))
+      + XXH3_mul128_fold64(a6 ^ getLE64VH(secret, ms2 + 48), a7 ^ getLE64VH(secret, ms2 + 56)));
+    return write128AndFold(output, high, low);
+  }
+
+  private static byte[] XXH3_initCustomSecret(long seed) {
+    byte[] cs = new byte[XXH3_SECRET_DEFAULT_SIZE];
+    int nbRounds = XXH3_SECRET_DEFAULT_SIZE / 16;
+    for (int i = 0; i < nbRounds; i++) {
+      long s0 = getLE64(XXH3_kSecret, SEC_BASE + 16L * i)     + seed;
+      long s1 = getLE64(XXH3_kSecret, SEC_BASE + 16L * i + 8) - seed;
+      putLE64(cs, SEC_BASE + 16L * i,     s0);
+      putLE64(cs, SEC_BASE + 16L * i + 8, s1);
+    }
+    return cs;
+  }
+
+  private static long XXH3_64bits_internal(
+      Object in, long off, int len, byte[] secret, long secOff, long seed) {
+    if (len <= 16)               return XXH3_len_0to16_64b(in, off, len, secret, secOff, seed);
+    if (len <= 128)              return XXH3_len_17to128_64b(in, off, len, secret, secOff, seed);
+    if (len <= XXH3_MIDSIZE_MAX) return XXH3_len_129to240_64b(in, off, len, secret, secOff, seed);
+    byte[] secretUse = (seed == 0) ? secret : XXH3_initCustomSecret(seed);
+    long   secOffUse = (seed == 0) ? secOff : SEC_BASE;
+    return XXH3_hashLong_64b(in, off, len, secretUse, secOffUse);
+  }
+
+  private static long XXH3_128bits_internal(
+      Object in, long off, int len, byte[] secret, long secOff, long seed, byte[] output) {
+    if (len <= 16) {
+      return XXH3_len_0to16_128b(in, off, len, secret, secOff, seed, output);
+    }
+    if (len <= 128) {
+      return XXH3_len_17to128_128b(in, off, len, secret, secOff, seed, output);
+    }
+    if (len <= XXH3_MIDSIZE_MAX) {
+      return XXH3_len_129to240_128b(in, off, len, secret, secOff, seed, output);
+    }
+    byte[] secretUse = (seed == 0) ? secret : XXH3_initCustomSecret(seed);
+    long   secOffUse = (seed == 0) ? secOff : SEC_BASE;
+    return XXH3_hashLong_128b(in, off, len, secretUse, secOffUse, output);
+  }
+
+  /** Encodes 128-bit result as byte[16] in big-endian canonical form: [high64 || low64]. */
+  private static byte[] toByteArray128(long high64, long low64) {
+    byte[] result = new byte[16];
+    write128AndFold(result, high64, low64);
+    return result;
+  }
+
+  private static long write128AndFold(byte[] output, long high64, long low64) {
+    putLE64VH(output, 0, Long.reverseBytes(high64));
+    putLE64VH(output, 8, Long.reverseBytes(low64));
+    return high64 ^ low64;
+  }
+
+  /**
+   * XOR-folds a 16-byte big-endian XXH3 128-bit hash to a single long (high64 XOR low64).
+   * Used by the XxHash128 codegen path to chain multi-input seeds without re-decoding
+   * the byte[] through ByteBuffer.
+   */
+  public static long fold128(byte[] hash128) {
+    long high = Long.reverseBytes(getLE64VH(hash128, 0));
+    long low  = Long.reverseBytes(getLE64VH(hash128, 8));
+    return high ^ low;
+  }
+
+  /** Hash a 32-bit integer using seed 0. */
+  public static long hashInt64(int input) { return hashInt64(input, 0L); }
+
+  /** Hash a 64-bit long using seed 0. */
+  public static long hashLong64(long input) { return hashLong64(input, 0L); }
+
+  /** Hash a raw byte region from Spark unsafe memory using seed 0. */
+  public static long hashUnsafeBytes64(Object base, long offset, int len) {
+    return XXH3_64bits_internal(base, offset, len, XXH3_kSecret, SEC_BASE, 0L);
+  }
+
+  /** Word-aligned variant of {@link #hashUnsafeBytes64} (len must be a multiple of 8). */
+  public static long hashUnsafeWords64(Object base, long offset, int len) {
+    if (len % 8 != 0) throw new IllegalArgumentException("len must be a multiple of 8: " + len);
+    return hashUnsafeBytes64(base, offset, len);
+  }
+
+  /** Hash a UTF-8 string using seed 0. */
+  public static long hashUTF8String64(UTF8String str) {
+    return hashUnsafeBytes64(str.getBaseObject(), str.getBaseOffset(), str.numBytes());
+  }
+
+  /** Hash a 32-bit integer with an explicit seed. */
+  public static long hashInt64(int input, long seed) {
+    seed ^= ((long) Integer.reverseBytes((int) seed)) << 32;
+    long i = input & 0xFFFFFFFFL;
+    long input64 = i | (i << 32);
+    long bitflip = BITFLIP_64_4_8 - seed;
+    return XXH3_rrmxmx(input64 ^ bitflip, 4);
+  }
+
+  /** Hash a 64-bit long with an explicit seed. */
+  public static long hashLong64(long input, long seed) {
+    seed ^= ((long) Integer.reverseBytes((int) seed)) << 32;
+    long bitflip = BITFLIP_64_4_8 - seed;
+    return XXH3_rrmxmx(Long.rotateLeft(input, 32) ^ bitflip, 8);
+  }
+
+  /** Hash a raw byte region from Spark unsafe memory with an explicit seed. */
+  public static long hashUnsafeBytes64(Object base, long offset, int len, long seed) {
+    return XXH3_64bits_internal(base, offset, len, XXH3_kSecret, SEC_BASE, seed);
+  }
+
+  /** 128-bit hash of a raw byte region from Spark unsafe memory using seed 0. */
+  public static byte[] hashUnsafeBytes128(Object base, long offset, int len) {
+    return hashUnsafeBytes128(base, offset, len, 0L);
+  }
+
+  /** 128-bit hash of a UTF-8 string using seed 0. */
+  public static byte[] hashUTF8String128(UTF8String str) {
+    return hashUnsafeBytes128(str.getBaseObject(), str.getBaseOffset(), str.numBytes());
+  }
+
+  /** 128-bit hash of a 32-bit integer using seed 0. */
+  public static byte[] hashInt128(int input) {
+    long i = input & 0xFFFFFFFFL;
+    long in64 = i | (i << 32);
+    long keyed = in64 ^ BITFLIP_128_4_8;
+    long multiplier = XXH_PRIME64_1 + 16L;
+    long mLow  = XXH_mult128_low64(keyed, multiplier);
+    long mHigh = XXH_mult128_high64(keyed, multiplier);
+    mHigh += mLow << 1;
+    mLow  ^= mHigh >>> 3;
+    long low  = mLow ^ (mLow >>> 35);
+    low  *= PRIME_MX2;
+    low  ^= low >>> 28;
+    return toByteArray128(XXH3_avalanche(mHigh), low);
+  }
+
+  /** 128-bit hash of a 64-bit long using seed 0. */
+  public static byte[] hashLong128(long input) {
+    long keyed = input ^ BITFLIP_128_4_8;
+    long multiplier = XXH_PRIME64_1 + 32L;
+    long mLow  = XXH_mult128_low64(keyed, multiplier);
+    long mHigh = XXH_mult128_high64(keyed, multiplier);
+    mHigh += mLow << 1;
+    mLow  ^= mHigh >>> 3;
+    long low  = mLow ^ (mLow >>> 35);
+    low  *= PRIME_MX2;
+    low  ^= low >>> 28;
+    return toByteArray128(XXH3_avalanche(mHigh), low);
+  }
+
+  /** 128-bit hash of a raw byte region from Spark unsafe memory with an explicit seed. */
+  public static byte[] hashUnsafeBytes128(Object base, long offset, int len, long seed) {
+    byte[] output = new byte[16];
+    hashUnsafeBytes128FoldedInto(base, offset, len, seed, output);
+    return output;
+  }
+
+  /** Hashes an unsafe byte region into {@code output} and returns high64 XOR low64. */
+  public static long hashUnsafeBytes128FoldedInto(
+      Object base, long offset, int len, long seed, byte[] output) {
+    checkOutput128(output);
+    return XXH3_128bits_internal(
+      base, offset, len, XXH3_kSecret, SEC_BASE, seed, output);
+  }
+
+  /** 128-bit hash of a UTF-8 string with an explicit seed. */
+  public static byte[] hashUTF8String128(UTF8String str, long seed) {
+    return hashUnsafeBytes128(str.getBaseObject(), str.getBaseOffset(), str.numBytes(), seed);
+  }
+
+  /** 128-bit hash of a 32-bit integer with an explicit seed. */
+  public static byte[] hashInt128(int input, long seed) {
+    byte[] buf = new byte[16];
+    hashInt128FoldedInto(input, seed, buf);
+    return buf;
+  }
+
+  /**
+   * 128-bit hash of a 32-bit integer into a caller-supplied 16-byte buffer (no allocation).
+   * Suitable for codegen hot paths where the buffer is pre-allocated per generated class.
+   */
+  public static void hashInt128Into(int input, long seed, byte[] buf) {
+    hashInt128FoldedInto(input, seed, buf);
+  }
+
+  /** Hashes a 32-bit integer into {@code buf} and returns high64 XOR low64. */
+  public static long hashInt128FoldedInto(int input, long seed, byte[] buf) {
+    checkOutput128(buf);
+    seed ^= ((long) Integer.reverseBytes((int) seed)) << 32;
+    long i = input & 0xFFFFFFFFL;
+    long in64 = i | (i << 32);
+    long keyed = in64 ^ (BITFLIP_128_4_8 + seed);
+    long multiplier = XXH_PRIME64_1 + 16L;
+    long mLow  = XXH_mult128_low64(keyed, multiplier);
+    long mHigh = XXH_mult128_high64(keyed, multiplier);
+    mHigh += mLow << 1;
+    mLow  ^= mHigh >>> 3;
+    long low  = mLow ^ (mLow >>> 35);
+    low  *= PRIME_MX2;
+    low  ^= low >>> 28;
+    return write128AndFold(buf, XXH3_avalanche(mHigh), low);
+  }
+
+  /** 128-bit hash of a 64-bit long with an explicit seed. */
+  public static byte[] hashLong128(long input, long seed) {
+    byte[] buf = new byte[16];
+    hashLong128FoldedInto(input, seed, buf);
+    return buf;
+  }
+
+  /**
+   * 128-bit hash of a 64-bit long into a caller-supplied 16-byte buffer (no allocation).
+   * Suitable for codegen hot paths where the buffer is pre-allocated per generated class.
+   */
+  public static void hashLong128Into(long input, long seed, byte[] buf) {
+    hashLong128FoldedInto(input, seed, buf);
+  }
+
+  /** Hashes a 64-bit integer into {@code buf} and returns high64 XOR low64. */
+  public static long hashLong128FoldedInto(long input, long seed, byte[] buf) {
+    checkOutput128(buf);
+    seed ^= ((long) Integer.reverseBytes((int) seed)) << 32;
+    long keyed = input ^ (BITFLIP_128_4_8 + seed);
+    long multiplier = XXH_PRIME64_1 + 32L;
+    long mLow  = XXH_mult128_low64(keyed, multiplier);
+    long mHigh = XXH_mult128_high64(keyed, multiplier);
+    mHigh += mLow << 1;
+    mLow  ^= mHigh >>> 3;
+    long low  = mLow ^ (mLow >>> 35);
+    low  *= PRIME_MX2;
+    low  ^= low >>> 28;
+    return write128AndFold(buf, XXH3_avalanche(mHigh), low);
+  }
+
+  /** 64-bit XXH3 hash of a byte[] region using seed 0. */
+  public static long hashUnsafeBytes64(byte[] base, long offset, int len) {
+    return hashUnsafeBytes64(base, offset, len, 0L);
+  }
+
+  /** 64-bit XXH3 hash of a byte[] region with an explicit seed. */
+  public static long hashUnsafeBytes64(byte[] base, long offset, int len, long seed) {
+    if (len <= 16)
+      return XXH3_len_0to16_64b(base, offset, len, XXH3_kSecret, SEC_BASE, seed);
+    if (len <= 128)
+      return XXH3_len_17to128_64b(base, offset, len, XXH3_kSecret, SEC_BASE, seed);
+    if (len <= XXH3_MIDSIZE_MAX)
+      return XXH3_len_129to240_64b(base, offset, len, XXH3_kSecret, SEC_BASE, seed);
+    byte[] secret = (seed == 0) ? XXH3_kSecret : XXH3_initCustomSecret(seed);
+    return XXH3_hashLong_64b_ba(base, offset, len, secret, SEC_BASE);
+  }
+
+  /** 128-bit XXH3 hash of a byte[] region using seed 0. */
+  public static byte[] hashUnsafeBytes128(byte[] base, long offset, int len) {
+    return hashUnsafeBytes128(base, offset, len, 0L);
+  }
+
+  /** 128-bit XXH3 hash of a byte[] region with an explicit seed. */
+  public static byte[] hashUnsafeBytes128(byte[] base, long offset, int len, long seed) {
+    byte[] output = new byte[16];
+    hashUnsafeBytes128FoldedInto(base, offset, len, seed, output);
+    return output;
+  }
+
+  /** Hashes a byte-array memory region into {@code output} and returns high64 XOR low64. */
+  public static long hashUnsafeBytes128FoldedInto(
+      byte[] base, long offset, int len, long seed, byte[] output) {
+    checkOutput128(output);
+    if (len <= 16) {
+      return XXH3_len_0to16_128b(base, offset, len, XXH3_kSecret, SEC_BASE, seed, output);
+    }
+    if (len <= 128) {
+      return XXH3_len_17to128_128b(base, offset, len, XXH3_kSecret, SEC_BASE, seed, output);
+    }
+    if (len <= XXH3_MIDSIZE_MAX) {
+      return XXH3_len_129to240_128b(base, offset, len, XXH3_kSecret, SEC_BASE, seed, output);
+    }
+    byte[] secret = (seed == 0) ? XXH3_kSecret : XXH3_initCustomSecret(seed);
+    return XXH3_hashLong_128b_ba(base, offset, len, secret, SEC_BASE, output);
+  }
+
+  /** 64-bit XXH3 of a byte[] region [idx, idx+len) using VarHandle reads for long inputs. */
+  public static long hashBytes64(byte[] base, int idx, int len) {
+    return hashBytes64(base, idx, len, 0L);
+  }
+
+  /** 64-bit XXH3 of a byte[] region [idx, idx+len) with an explicit seed. */
+  public static long hashBytes64(byte[] base, int idx, int len, long seed) {
+    Objects.checkFromIndexSize(idx, len, base.length);
+    long off = Platform.BYTE_ARRAY_OFFSET + idx;
+    if (len <= 16)
+      return XXH3_len_0to16_64b(base, off, len, XXH3_kSecret, SEC_BASE, seed);
+    if (len <= 128)
+      return XXH3_len_17to128_64b(base, off, len, XXH3_kSecret, SEC_BASE, seed);
+    if (len <= XXH3_MIDSIZE_MAX)
+      return XXH3_len_129to240_64b(base, off, len, XXH3_kSecret, SEC_BASE, seed);
+    byte[] secret = (seed == 0) ? XXH3_kSecret : XXH3_initCustomSecret(seed);
+    return XXH3_hashLong_64b_vh(base, idx, len, secret, 0);
+  }
+
+  /** 128-bit XXH3 of a byte[] region [idx, idx+len) using VarHandle reads for long inputs. */
+  public static byte[] hashBytes128(byte[] base, int idx, int len) {
+    return hashBytes128(base, idx, len, 0L);
+  }
+
+  /** 128-bit XXH3 of a byte[] region [idx, idx+len) with an explicit seed. */
+  public static byte[] hashBytes128(byte[] base, int idx, int len, long seed) {
+    byte[] output = new byte[16];
+    hashBytes128FoldedInto(base, idx, len, seed, output);
+    return output;
+  }
+
+  /** Hashes a byte-array slice into {@code output} and returns high64 XOR low64. */
+  public static long hashBytes128FoldedInto(
+      byte[] base, int idx, int len, long seed, byte[] output) {
+    Objects.checkFromIndexSize(idx, len, base.length);
+    checkOutput128(output);
+    long off = Platform.BYTE_ARRAY_OFFSET + idx;
+    if (len <= 16) {
+      return XXH3_len_0to16_128b(base, off, len, XXH3_kSecret, SEC_BASE, seed, output);
+    }
+    if (len <= 128) {
+      return XXH3_len_17to128_128b(base, off, len, XXH3_kSecret, SEC_BASE, seed, output);
+    }
+    if (len <= XXH3_MIDSIZE_MAX) {
+      return XXH3_len_129to240_128b(base, off, len, XXH3_kSecret, SEC_BASE, seed, output);
+    }
+    byte[] secret = (seed == 0) ? XXH3_kSecret : XXH3_initCustomSecret(seed);
+    return XXH3_hashLong_128b_vh(base, idx, len, secret, 0, output);
+  }
+
   public static long hash64(byte[] input) {
     return hash64(input, 0L);
   }
 
-  // ---- XXH3 128-bit ----
-
-  private static long mult32to64(long a, long b) {
-    return (a & 0xFFFFFFFFL) * (b & 0xFFFFFFFFL);
+  public static long hash64(byte[] input, long seed) {
+    return hashBytes64(input, 0, input.length, seed);
   }
 
-  private static void mix32B(long[] acc, byte[] input, int in1, int in2, int secOff, long seed) {
-    acc[0] += mix16B(input, in1, secOff, seed);
-    acc[0] ^= readLE64(input, in2) + readLE64(input, in2 + 8);
-    acc[1] += mix16B(input, in2, secOff + 16, seed);
-    acc[1] ^= readLE64(input, in1) + readLE64(input, in1 + 8);
-  }
-
-  private static long[] finalize128(long[] acc, int len, long seed) {
-    long low = xxh3Avalanche(acc[0] + acc[1]);
-    long high = -xxh3Avalanche(
-        acc[0] * PRIME64_1 + acc[1] * PRIME64_4 + ((long) len - seed) * PRIME64_2);
-    return new long[] {low, high};
-  }
-
-  /** Returns the XXH3 128-bit hash as {@code {low64, high64}}. */
   public static long[] hash128(byte[] input, long seed) {
-    int len = input.length;
-    if (len <= 16) {
-      if (len > 8) {
-        return len9to16128(input, len, seed);
-      } else if (len >= 4) {
-        return len4to8128(input, len, seed);
-      } else if (len > 0) {
-        return len1to3128(input, len, seed);
-      }
-      long low = xxh64Avalanche(seed ^ readLE64(SECRET, 64) ^ readLE64(SECRET, 72));
-      long high = xxh64Avalanche(seed ^ readLE64(SECRET, 80) ^ readLE64(SECRET, 88));
-      return new long[] {low, high};
-    } else if (len <= 128) {
-      return len17to128128(input, len, seed);
-    } else if (len <= 240) {
-      return len129to240128(input, len, seed);
-    }
-    return hashLong128(input, len, seed);
-  }
-
-  private static long[] len1to3128(byte[] input, int len, long seed) {
-    int c1 = input[0] & 0xFF;
-    int c2 = input[len >> 1] & 0xFF;
-    int c3 = input[len - 1] & 0xFF;
-    int combinedl = (c1 << 16) | (c2 << 24) | c3 | (len << 8);
-    int combinedh = Integer.rotateLeft(Integer.reverseBytes(combinedl), 13);
-    long bitflipl = (readLE32(SECRET, 0) ^ readLE32(SECRET, 4)) + seed;
-    long bitfliph = (readLE32(SECRET, 8) ^ readLE32(SECRET, 12)) - seed;
-    long low = xxh64Avalanche((combinedl & 0xFFFFFFFFL) ^ bitflipl);
-    long high = xxh64Avalanche((combinedh & 0xFFFFFFFFL) ^ bitfliph);
+    byte[] output = hashBytes128(input, 0, input.length, seed);
+    long high = Long.reverseBytes(getLE64VH(output, 0));
+    long low = Long.reverseBytes(getLE64VH(output, 8));
     return new long[] {low, high};
   }
 
-  private static long[] len4to8128(byte[] input, int len, long seed) {
-    seed ^= ((long) Integer.reverseBytes((int) seed) & 0xFFFFFFFFL) << 32;
-    long inputLo = readLE32(input, 0);
-    long inputHi = readLE32(input, len - 4);
-    long input64 = inputLo | (inputHi << 32);
-    long keyed = input64 ^ ((readLE64(SECRET, 16) ^ readLE64(SECRET, 24)) + seed);
-    long mul = PRIME64_1 + ((long) len << 2);
-    long lo = keyed * mul;
-    long hi = unsignedMultiplyHigh(keyed, mul);
-    hi += lo << 1;
-    lo ^= hi >>> 3;
-    lo ^= lo >>> 35;
-    lo *= PRIME_MX2;
-    lo ^= lo >>> 28;
-    return new long[] {lo, xxh3Avalanche(hi)};
-  }
-
-  private static long[] len9to16128(byte[] input, int len, long seed) {
-    long bitflipl = (readLE64(SECRET, 32) ^ readLE64(SECRET, 40)) - seed;
-    long bitfliph = (readLE64(SECRET, 48) ^ readLE64(SECRET, 56)) + seed;
-    long inputLo = readLE64(input, 0);
-    long inputHi = readLE64(input, len - 8);
-    long m0 = inputLo ^ inputHi ^ bitflipl;
-    long lo = m0 * PRIME64_1;
-    long hi = unsignedMultiplyHigh(m0, PRIME64_1);
-    lo += (long) (len - 1) << 54;
-    inputHi ^= bitfliph;
-    hi += inputHi + mult32to64(inputHi, PRIME32_2 - 1);
-    lo ^= Long.reverseBytes(hi);
-    long h2lo = lo * PRIME64_2;
-    long h2hi = unsignedMultiplyHigh(lo, PRIME64_2) + hi * PRIME64_2;
-    return new long[] {xxh3Avalanche(h2lo), xxh3Avalanche(h2hi)};
-  }
-
-  private static long[] len17to128128(byte[] input, int len, long seed) {
-    long[] acc = {(long) len * PRIME64_1, 0L};
-    int i = (len - 1) / 32;
-    do {
-      mix32B(acc, input, 16 * i, len - 16 * (i + 1), 32 * i, seed);
-    } while (i-- != 0);
-    return finalize128(acc, len, seed);
-  }
-
-  private static long[] len129to240128(byte[] input, int len, long seed) {
-    long[] acc = {(long) len * PRIME64_1, 0L};
-    for (int i = 0; i < 4; i++) {
-      mix32B(acc, input, 32 * i, 32 * i + 16, 32 * i, seed);
-    }
-    acc[0] = xxh3Avalanche(acc[0]);
-    acc[1] = xxh3Avalanche(acc[1]);
-    for (int i = 4; i < (len >> 5); i++) {
-      mix32B(acc, input, 32 * i, 32 * i + 16, (i - 4) * 32 + 3, seed);
-    }
-    mix32B(acc, input, len - 16, len - 32, 103, -seed);
-    return finalize128(acc, len, seed);
-  }
-
-  private static long[] hashLong128(byte[] input, int len, long seed) {
-    byte[] secret = customSecret(seed);
-    long[] acc = hashLongAccumulate(input, len, secret);
-    long low = mergeAccs(acc, secret, SECRET_MERGEACCS_START, (long) len * PRIME64_1);
-    long high = mergeAccs(acc, secret, SECRET_SIZE - STRIPE_LEN - SECRET_MERGEACCS_START,
-        ~((long) len * PRIME64_2));
-    return new long[] {low, high};
-  }
-
-  private static final byte[] HEX_DIGITS = {
-      '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'a', 'b', 'c', 'd', 'e', 'f'
-  };
-
-  // Hex-writing siblings of the length-branch methods above: same arithmetic, but they encode
-  // the two lanes directly into the caller's hex buffer instead of returning a long[]. This
-  // avoids the result-pair array for these Into variants; hashLongAccumulate (>240 bytes,
-  // used by hashLong128Into below) still allocates its own accumulator. hash128 above is kept
-  // array-returning for callers that need the raw pair.
-  private static void len1to3128Into(byte[] input, int len, long seed, byte[] hex) {
-    int c1 = input[0] & 0xFF;
-    int c2 = input[len >> 1] & 0xFF;
-    int c3 = input[len - 1] & 0xFF;
-    int combinedl = (c1 << 16) | (c2 << 24) | c3 | (len << 8);
-    int combinedh = Integer.rotateLeft(Integer.reverseBytes(combinedl), 13);
-    long bitflipl = (readLE32(SECRET, 0) ^ readLE32(SECRET, 4)) + seed;
-    long bitfliph = (readLE32(SECRET, 8) ^ readLE32(SECRET, 12)) - seed;
-    long low = xxh64Avalanche((combinedl & 0xFFFFFFFFL) ^ bitflipl);
-    long high = xxh64Avalanche((combinedh & 0xFFFFFFFFL) ^ bitfliph);
-    writeHex64(hex, 0, high);
-    writeHex64(hex, 16, low);
-  }
-
-  private static void len4to8128Into(byte[] input, int len, long seed, byte[] hex) {
-    seed ^= ((long) Integer.reverseBytes((int) seed) & 0xFFFFFFFFL) << 32;
-    long inputLo = readLE32(input, 0);
-    long inputHi = readLE32(input, len - 4);
-    long input64 = inputLo | (inputHi << 32);
-    long keyed = input64 ^ ((readLE64(SECRET, 16) ^ readLE64(SECRET, 24)) + seed);
-    long mul = PRIME64_1 + ((long) len << 2);
-    long lo = keyed * mul;
-    long hi = unsignedMultiplyHigh(keyed, mul);
-    hi += lo << 1;
-    lo ^= hi >>> 3;
-    lo ^= lo >>> 35;
-    lo *= PRIME_MX2;
-    lo ^= lo >>> 28;
-    writeHex64(hex, 0, xxh3Avalanche(hi));
-    writeHex64(hex, 16, lo);
-  }
-
-  private static void len9to16128Into(byte[] input, int len, long seed, byte[] hex) {
-    long bitflipl = (readLE64(SECRET, 32) ^ readLE64(SECRET, 40)) - seed;
-    long bitfliph = (readLE64(SECRET, 48) ^ readLE64(SECRET, 56)) + seed;
-    long inputLo = readLE64(input, 0);
-    long inputHi = readLE64(input, len - 8);
-    long m0 = inputLo ^ inputHi ^ bitflipl;
-    long lo = m0 * PRIME64_1;
-    long hi = unsignedMultiplyHigh(m0, PRIME64_1);
-    lo += (long) (len - 1) << 54;
-    inputHi ^= bitfliph;
-    hi += inputHi + mult32to64(inputHi, PRIME32_2 - 1);
-    lo ^= Long.reverseBytes(hi);
-    long h2lo = lo * PRIME64_2;
-    long h2hi = unsignedMultiplyHigh(lo, PRIME64_2) + hi * PRIME64_2;
-    writeHex64(hex, 0, xxh3Avalanche(h2hi));
-    writeHex64(hex, 16, xxh3Avalanche(h2lo));
-  }
-
-  // Scalar-returning siblings of mix32B's two lanes, used so the Into variants below thread the
-  // accumulator through local variables instead of a long[2] array.
-  private static long mixLowLane(long acc0, byte[] input, int in1, int in2, int secOff, long seed) {
-    acc0 += mix16B(input, in1, secOff, seed);
-    acc0 ^= readLE64(input, in2) + readLE64(input, in2 + 8);
-    return acc0;
-  }
-
-  private static long mixHighLane(
-      long acc1, byte[] input, int in1, int in2, int secOff, long seed) {
-    acc1 += mix16B(input, in2, secOff + 16, seed);
-    acc1 ^= readLE64(input, in1) + readLE64(input, in1 + 8);
-    return acc1;
-  }
-
-  private static void len17to128128Into(byte[] input, int len, long seed, byte[] hex) {
-    long acc0 = (long) len * PRIME64_1;
-    long acc1 = 0L;
-    int i = (len - 1) / 32;
-    do {
-      acc0 = mixLowLane(acc0, input, 16 * i, len - 16 * (i + 1), 32 * i, seed);
-      acc1 = mixHighLane(acc1, input, 16 * i, len - 16 * (i + 1), 32 * i, seed);
-    } while (i-- != 0);
-    finalize128Into(acc0, acc1, len, seed, hex);
-  }
-
-  private static void len129to240128Into(byte[] input, int len, long seed, byte[] hex) {
-    long acc0 = (long) len * PRIME64_1;
-    long acc1 = 0L;
-    for (int i = 0; i < 4; i++) {
-      acc0 = mixLowLane(acc0, input, 32 * i, 32 * i + 16, 32 * i, seed);
-      acc1 = mixHighLane(acc1, input, 32 * i, 32 * i + 16, 32 * i, seed);
-    }
-    acc0 = xxh3Avalanche(acc0);
-    acc1 = xxh3Avalanche(acc1);
-    for (int i = 4; i < (len >> 5); i++) {
-      acc0 = mixLowLane(acc0, input, 32 * i, 32 * i + 16, (i - 4) * 32 + 3, seed);
-      acc1 = mixHighLane(acc1, input, 32 * i, 32 * i + 16, (i - 4) * 32 + 3, seed);
-    }
-    acc0 = mixLowLane(acc0, input, len - 16, len - 32, 103, -seed);
-    acc1 = mixHighLane(acc1, input, len - 16, len - 32, 103, -seed);
-    finalize128Into(acc0, acc1, len, seed, hex);
-  }
-
-  private static void finalize128Into(long acc0, long acc1, int len, long seed, byte[] hex) {
-    long low = xxh3Avalanche(acc0 + acc1);
-    long high = -xxh3Avalanche(
-        acc0 * PRIME64_1 + acc1 * PRIME64_4 + ((long) len - seed) * PRIME64_2);
-    writeHex64(hex, 0, high);
-    writeHex64(hex, 16, low);
-  }
-
-  private static void hashLong128Into(byte[] input, int len, long seed, byte[] hex) {
-    byte[] secret = customSecret(seed);
-    long[] acc = hashLongAccumulate(input, len, secret);
-    long low = mergeAccs(acc, secret, SECRET_MERGEACCS_START, (long) len * PRIME64_1);
-    long high = mergeAccs(acc, secret, SECRET_SIZE - STRIPE_LEN - SECRET_MERGEACCS_START,
-        ~((long) len * PRIME64_2));
-    writeHex64(hex, 0, high);
-    writeHex64(hex, 16, low);
-  }
-
-  private static void hashHex128(byte[] input, long seed, byte[] hex) {
-    int len = input.length;
-    if (len <= 16) {
-      if (len > 8) {
-        len9to16128Into(input, len, seed, hex);
-        return;
-      } else if (len >= 4) {
-        len4to8128Into(input, len, seed, hex);
-        return;
-      } else if (len > 0) {
-        len1to3128Into(input, len, seed, hex);
-        return;
-      }
-      long low = xxh64Avalanche(seed ^ readLE64(SECRET, 64) ^ readLE64(SECRET, 72));
-      long high = xxh64Avalanche(seed ^ readLE64(SECRET, 80) ^ readLE64(SECRET, 88));
-      writeHex64(hex, 0, high);
-      writeHex64(hex, 16, low);
-    } else if (len <= 128) {
-      len17to128128Into(input, len, seed, hex);
-    } else if (len <= 240) {
-      len129to240128Into(input, len, seed, hex);
-    } else {
-      hashLong128Into(input, len, seed, hex);
-    }
-  }
-
-  /** Returns the XXH3 128-bit hash as a 32-character lowercase hex string (default seed 0). */
   public static UTF8String hash128Hex(byte[] input) {
     return hash128Hex(input, 0L);
   }
 
-  /**
-   * Returns the XXH3 128-bit hash as a 32-character lowercase hex string (canonical big-endian).
-   */
   public static UTF8String hash128Hex(byte[] input, long seed) {
-    byte[] hex = new byte[32];
-    hashHex128(input, seed, hex);
-    return UTF8String.fromBytes(hex);
+    byte[] output = hashBytes128(input, 0, input.length, seed);
+    return UTF8String.fromString(HexFormat.of().formatHex(output));
   }
 
-  private static void writeHex64(byte[] hex, int offset, long value) {
-    for (int i = 0; i < 8; i++) {
-      int b = (int) (value >>> (56 - 8 * i)) & 0xFF;
-      hex[offset + i * 2] = HEX_DIGITS[b >>> 4];
-      hex[offset + i * 2 + 1] = HEX_DIGITS[b & 0x0F];
-    }
-  }
+  private XXH3() {}
 }

@@ -852,6 +852,7 @@ object FunctionRegistry {
     expression[XxHash64]("xxhash64"),
     expression[Xxh364]("xxh3_64"),
     expression[Xxh3128]("xxh3_128"),
+    expression[Xxh3128Hex]("xxh3_128_hex"),
     expression[Sha1]("sha", true),
     expression[Sha1]("sha1"),
     expression[Sha2]("sha2"),

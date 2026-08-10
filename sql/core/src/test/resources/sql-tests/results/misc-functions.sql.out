@@ -421,19 +421,51 @@ struct<xxh3_64(CAST(Spark AS BINARY)):bigint>
 
 
 -- !query
-SELECT xxh3_128('Spark')
+SELECT hex(xxh3_128('Spark'))
 -- !query schema
-struct<xxh3_128(Spark):string>
+struct<hex(xxh3_128(Spark)):string>
+-- !query output
+7D57DD84C60C86CA1F4E82AB91A12B5E
+
+
+-- !query
+SELECT length(xxh3_128('Spark')), hex(xxh3_128(CAST('Spark' AS BINARY)))
+-- !query schema
+struct<length(xxh3_128(Spark)):int,hex(xxh3_128(CAST(Spark AS BINARY))):string>
+-- !query output
+16	7D57DD84C60C86CA1F4E82AB91A12B5E
+
+
+-- !query
+SELECT xxh3_128_hex('Spark')
+-- !query schema
+struct<xxh3_128_hex(Spark):string>
 -- !query output
 7d57dd84c60c86ca1f4e82ab91a12b5e
 
 
 -- !query
-SELECT xxh3_128(CAST('Spark' AS BINARY))
+SELECT xxh3_64('Spark', 1, NULL)
 -- !query schema
-struct<xxh3_128(CAST(Spark AS BINARY)):string>
+struct<xxh3_64(Spark, 1, NULL):bigint>
 -- !query output
-7d57dd84c60c86ca1f4e82ab91a12b5e
+-476795872089872182
+
+
+-- !query
+SELECT xxh3_128_hex('Spark', 1, NULL)
+-- !query schema
+struct<xxh3_128_hex(Spark, 1, NULL):string>
+-- !query output
+200e1b46c62621eb9b858d2f888510b7
+
+
+-- !query
+SELECT length(xxh3_128('Spark', 1, NULL)), hex(xxh3_128('Spark', 1, NULL))
+-- !query schema
+struct<length(xxh3_128(Spark, 1, NULL)):int,hex(xxh3_128(Spark, 1, NULL)):string>
+-- !query output
+16	200E1B46C62621EB9B858D2F888510B7
 
 
 -- !query
@@ -447,6 +479,14 @@ NULL
 -- !query
 SELECT xxh3_128(CAST(NULL AS BINARY))
 -- !query schema
-struct<xxh3_128(CAST(NULL AS BINARY)):string>
+struct<xxh3_128(CAST(NULL AS BINARY)):binary>
 -- !query output
 NULL
+
+
+-- !query
+SELECT xxh3_64(NULL, NULL), length(xxh3_128(NULL, NULL)), hex(xxh3_128(NULL, NULL))
+-- !query schema
+struct<xxh3_64(NULL, NULL):bigint,length(xxh3_128(NULL, NULL)):int,hex(xxh3_128(NULL, NULL)):string>
+-- !query output
+5996169719052212139	16	58955C1B0F283237280CBECF3A4AC000
